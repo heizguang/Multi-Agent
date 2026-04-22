@@ -228,6 +228,59 @@ class MultiAgentSystem:
             "profile": profile,
             "preferences": preferences
         }
+    
+    def switch_model(self, model: str = None, base_url: str = None, api_key: str = None) -> Dict[str, Any]:
+        """动态切换模型配置
+        
+        Args:
+            model: 新模型名称（如 gpt-4、qwen-max 等）
+            base_url: 新的API地址
+            api_key: 新的API密钥
+        
+        Returns:
+            切换结果信息
+        """
+        try:
+            if model:
+                self.config["llm"]["model"] = model
+            if base_url:
+                self.config["llm"]["base_url"] = base_url
+            if api_key:
+                self.config["llm"]["api_key"] = api_key
+            
+            new_llm = self._init_llm()
+            old_model = self.llm.model if hasattr(self.llm, 'model') else "unknown"
+            self.llm = new_llm
+            
+            new_model = self.config["llm"]["model"]
+            self.master_agent.llm = new_llm
+            
+            self.master_agent.sql_agent.llm = new_llm
+            self.master_agent.analysis_agent.llm = new_llm
+            self.master_agent.search_agent.llm = new_llm
+            
+            return {
+                "success": True,
+                "old_model": old_model,
+                "new_model": new_model,
+                "message": f"模型切换成功: {old_model} -> {new_model}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "模型切换失败"
+            }
+    
+    def get_current_model(self) -> Dict[str, Any]:
+        """获取当前模型信息"""
+        model_name = self.config["llm"].get("model", "unknown")
+        base_url = self.config["llm"].get("base_url", "")
+        return {
+            "model": model_name,
+            "base_url": base_url,
+            "provider": self.config["llm"].get("provider", "dashscope")
+        }
 
 SQLAgent = MultiAgentSystem
 

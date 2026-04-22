@@ -321,6 +321,48 @@ def query_stream():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/switch_model', methods=['POST'])
+def switch_model():
+    """动态切换模型接口"""
+    try:
+        data = request.json
+        user_id = data.get('user_id', 'guest')
+        model = data.get('model')
+        base_url = data.get('base_url')
+        api_key = data.get('api_key')
+        
+        system = get_or_create_system(user_id)
+        result = system.switch_model(model=model, base_url=base_url, api_key=api_key)
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'message': '模型切换失败'
+        }), 500
+
+
+@app.route('/api/model_info', methods=['GET'])
+def model_info():
+    """获取当前模型信息"""
+    try:
+        user_id = request.args.get('user_id', 'guest')
+        
+        system = get_or_create_system(user_id)
+        model_info = system.get_current_model()
+        
+        return jsonify({
+            'success': True,
+            'model_info': model_info
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """健康检查接口"""
@@ -350,8 +392,8 @@ if __name__ == '__main__':
         print("错误：未设置 OPENAI_API_KEY（可放在 .env 中）")
         sys.exit(1)
     
-    print("🚀 多智能体数据查询系统 Web API 启动中...")
-    print("📡 访问地址: http://localhost:5000")
+    print("多智能体数据查询系统 Web API 启动中...")
+    print("访问地址: http://localhost:5000")
     
     app.run(host='0.0.0.0', port=5000, debug=True)
 
