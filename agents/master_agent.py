@@ -9,6 +9,7 @@ import concurrent.futures
 import json
 import logging
 import logging.handlers
+import time
 from typing import TypedDict, Sequence, Dict, Any, Optional, Annotated, Generator
 from pathlib import Path
 
@@ -750,6 +751,7 @@ class MasterAgent:
         # 缓存结果（限制缓存大小）
         if len(self._cache) < 100:
             self._cache[cache_key] = answer
+            logger.info(f"结果已加入缓存: {question[:30]}...")
         
         return answer
     
@@ -790,10 +792,21 @@ class MasterAgent:
         最终 LLM 汇总回答以流式方式逐字输出。
         
         Yields:
-            SSE 格式字符串：data: {...}\\n\\n
+            SSE 格式字符串：data: {...}\n\n
         """
         def sse(type_: str, **kwargs) -> str:
             return f"data: {json.dumps({'type': type_, **kwargs}, ensure_ascii=False)}\n\n"
+        
+        # 缓存检查
+        cache_key = hash(question[:50])
+        if cache_key in self._cache:
+            logger.info("命中缓存，直接返回结果")
+            cached_answer = self._cache[cache_key]
+            for char in cached_answer:
+                yield sse("chunk", content=char)
+                time.sleep(0.01)
+            yield sse("done", answer=cached_answer)
+            return
         
         # --- 意图识别（直接调用，以便立即推送状态）---
         yield sse("status", message="正在识别问题意图...")
@@ -1012,6 +1025,11 @@ class MasterAgent:
                     yield sse("chunk", content=final_answer)
         
         yield sse("done", answer=final_answer)
+        
+        # 缓存结果
+        if len(self._cache) < 100:
+            self._cache[cache_key] = final_answer
+            logger.info(f"结果已加入缓存: {question[:30]}...")
         
         # --- 保存对话历史到 LangGraph checkpointer ---
         try:
