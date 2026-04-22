@@ -5,6 +5,7 @@
 支持6种意图：simple_answer / sql_only / analysis_only / sql_and_analysis / web_search / search_and_sql
 """
 
+import concurrent.futures
 import json
 from typing import TypedDict, Sequence, Dict, Any, Optional, Annotated, Generator
 from pathlib import Path
@@ -75,6 +76,31 @@ class MasterAgent:
                 return response
 
         return "我是智能数据查询助手。请问有什么关于员工、部门或薪资的问题需要我帮忙吗？"
+
+    def _run_search_and_sql_parallel(self, question: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """并行执行 SQL 查询和原始联网搜索，再做联合总结。"""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            sql_future = pool.submit(self.sql_agent.query, question)
+            search_future = pool.submit(self.search_agent.search_raw, question)
+            sql_result = sql_future.result()
+            raw_search_result = search_future.result()
+
+        if raw_search_result.get("error"):
+            search_result = {
+                "answer": None,
+                "sources": raw_search_result.get("sources", []),
+                "error": raw_search_result["error"]
+            }
+        else:
+            sql_data = sql_result.get("data", "{}") or "{}"
+            search_result = self.search_agent.synthesize_search_and_sql(
+                question,
+                raw_search_result.get("formatted_text", ""),
+                raw_search_result.get("sources", []),
+                sql_data
+            )
+
+        return sql_result, search_result
 
     def _rule_based_intent(self, question: str) -> str:
         """当 LLM 识别失败或不稳定时，使用规则进行意图兜底。"""
@@ -480,7 +506,7 @@ class MasterAgent:
         thread_id = state["metadata"].get("thread_id", "default")
         
         try:
-            sql_result = self.sql_agent.query(question)
+            sql_result, search_result = self._run_search_and_sql_parallel(question)
             state["sql_result"] = sql_result
             state["metadata"]["sql_result"] = sql_result
             
@@ -532,7 +558,7 @@ class MasterAgent:
         
         try:
             # 先查数据库
-            sql_result = self.sql_agent.query(question)
+            sql_result, search_result = self._run_search_and_sql_parallel(question)
             state["sql_result"] = sql_result
             state["metadata"]["sql_result"] = sql_result
             
@@ -541,8 +567,6 @@ class MasterAgent:
             self.session_data[thread_id]["last_sql_result"] = sql_result
             
             # 再联网搜索 + 联合分析
-            sql_data = sql_result.get("data", "{}") or "{}"
-            search_result = self.search_agent.search_and_compare(question, sql_data)
             state["search_result"] = search_result
             state["metadata"]["search_result"] = search_result
             
@@ -806,7 +830,7 @@ class MasterAgent:
         
         else:
             # SQL 查询（适用于 sql_only / sql_and_analysis / search_and_sql）
-            if intent in ("sql_only", "sql_and_analysis", "search_and_sql"):
+            if intent in ("sql_only", "sql_and_analysis"):
                 yield sse("status", message="正在查询数据库...")
                 sql_result = self.sql_agent.query(question)
                 
@@ -854,8 +878,18 @@ class MasterAgent:
             # 搜索 + 数据库联合分析
             if intent == "search_and_sql":
                 yield sse("status", message="正在联网搜索行业数据...")
-                sql_data_str = (sql_result.get("data") or "{}") if sql_result else "{}"
-                search_result = self.search_agent.search_and_compare(question, sql_data_str)
+                sql_result, search_result = self._run_search_and_sql_parallel(question)
+                if sql_result.get("sql"):
+                    yield sse(
+                        "sql",
+                        sql=sql_result["sql"],
+                        retry_count=sql_result.get("retry_count", 0)
+                    )
+                if sql_result.get("error"):
+                    yield sse("error", message=f"数据库查询出错: {sql_result['error']}")
+                if thread_id not in self.session_data:
+                    self.session_data[thread_id] = {}
+                self.session_data[thread_id]["last_sql_result"] = sql_result
                 if search_result.get("sources"):
                     yield sse("sources", sources=search_result["sources"])
                 if search_result.get("error"):
