@@ -106,7 +106,7 @@ class MultiAgentSystem:
             temperature = llm_config["temperature"]
             max_tokens = llm_config["max_tokens"]
 
-            # 优先尝试 ChatOpenAI；若被网关拦截则自动切换到 requests 通道。
+            # 初始化阶段不主动探活，避免登录时被模型网络波动阻塞。
             try:
                 sdk_llm = ChatOpenAI(
                     model=model,
@@ -117,8 +117,7 @@ class MultiAgentSystem:
                     max_tokens=max_tokens,
                     streaming=True,
                 )
-                sdk_llm.invoke("ping")
-                print("[LLM] ChatOpenAI 通道可用")
+                print("[LLM] ChatOpenAI 通道初始化完成")
                 return sdk_llm
             except Exception as e:
                 print(f"[LLM] ChatOpenAI 通道不可用，切换 requests 通道: {e}")
