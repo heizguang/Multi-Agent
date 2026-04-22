@@ -85,16 +85,16 @@ pip install -r requirements.txt
 
 ```bash
 # Windows
-set OPENAI_BASE_URL=https://www.v2code.cc
+set OPENAI_BASE_URL=your_openai_base_url
 set OPENAI_API_KEY=your_openai_key
 set OPENAI_MODEL=gpt-5.4
 # or
-$env:OPENAI_BASE_URL = "https://www.v2code.cc"
+$env:OPENAI_BASE_URL = "your_openai_base_url"
 $env:OPENAI_API_KEY = "your_openai_key"
 $env:OPENAI_MODEL = "gpt-5.4"
 
 # Linux/Mac
-export OPENAI_BASE_URL=https://www.v2code.cc
+export OPENAI_BASE_URL=your_openai_base_url
 export OPENAI_API_KEY=your_openai_key
 export OPENAI_MODEL=gpt-5.4
 ```
@@ -299,7 +299,7 @@ intelligent_data_query/
 ## 注意事项
 
 - 必须设置 `OPENAI_API_KEY` 环境变量（推荐放在 `.env`）
-- 使用中转时请设置 `OPENAI_BASE_URL`（例如 `https://www.v2code.cc`）
+- 使用兼容接口或中转服务时请设置 `OPENAI_BASE_URL`
 - 模型建议配置为 `OPENAI_MODEL=gpt-5.4`（可按支持列表自行更换）
 - 联网搜索需额外设置 `TAVILY_API_KEY`（不配置不影响其他功能）
 - 初次运行前需执行数据库初始化脚本
