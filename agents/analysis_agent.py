@@ -5,11 +5,34 @@
 """
 
 import json
+import logging
+import logging.handlers
 from collections import Counter
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
 from langchain_core.language_models import BaseLLM
+
+log_dir = Path(__file__).parent.parent / "logs"
+log_dir.mkdir(parents=True, exist_ok=True)
+
+file_handler = logging.handlers.RotatingFileHandler(
+    log_dir / "app.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding='utf-8'
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        file_handler,
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
@@ -245,6 +268,8 @@ class DataAnalysisAgent:
                 "error": 错误信息（成功时为None）
             }
         """
+        logger.info(f"Analysis Agent 收到分析请求")
+        
         result = {
             "analysis": None,
             "chart": None,
@@ -256,15 +281,18 @@ class DataAnalysisAgent:
             
             if parsed_data is None:
                 result["error"] = "无法解析数据"
+                logger.warning("Analysis Agent 无法解析数据")
                 return result
             
             if isinstance(parsed_data, dict) and "error" in parsed_data:
                 result["error"] = f"数据包含错误: {parsed_data['error']}"
+                logger.warning(f"Analysis Agent 数据包含错误: {parsed_data['error']}")
                 return result
             
             data_summary = self._prepare_data_summary(parsed_data)
             
             # 文字分析
+            logger.info("Analysis Agent 正在生成文字分析...")
             try:
                 prompt = get_analysis_prompt(
                     data_summary=data_summary,
@@ -278,6 +306,7 @@ class DataAnalysisAgent:
             
             # ECharts 图表配置（仅对适合可视化的数据生成）
             if self._should_generate_chart(parsed_data):
+                logger.info("Analysis Agent 正在生成图表配置...")
                 chart_config = self._generate_chart_config(parsed_data, data_summary, context)
                 if not chart_config:
                     chart_config = self._fallback_chart_config(parsed_data, context)

@@ -10,9 +10,33 @@ import sys
 import json
 import time
 import threading
+import logging
+import logging.handlers
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
+
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+file_handler = logging.handlers.RotatingFileHandler(
+    LOG_DIR / "app.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding='utf-8'
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[console_handler, file_handler]
+)
+logger = logging.getLogger(__name__)
 
 # 将当前目录添加到Python路径
 sys.path.insert(0, os.path.dirname(__file__))
@@ -33,6 +57,28 @@ user_systems: Dict[str, MultiAgentSystem] = {}
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_FILE = LOG_DIR / "conversation_logs.jsonl"
 _log_lock = threading.Lock()
+
+
+@app.before_request
+def log_request_info():
+    """请求开始时记录日志"""
+    request.start_time = time.perf_counter()
+    logger.info(f"{request.method} {request.path} - 请求开始")
+
+
+@app.after_request
+def log_response_info(response):
+    """请求完成后记录日志"""
+    duration = time.perf_counter() - getattr(request, 'start_time', time.perf_counter())
+    status = response.status_code
+    
+    if status >= 200 and status < 300:
+        logger.info(f"{request.method} {request.path} - {status} - {duration*1000:.2f}ms")
+    elif status >= 400:
+        logger.warning(f"{request.method} {request.path} - {status} - {duration*1000:.2f}ms")
+    else:
+        logger.info(f"{request.method} {request.path} - {status} - {duration*1000:.2f}ms")
+    return response
 
 
 def _append_chat_log(record: Dict[str, Any]) -> None:

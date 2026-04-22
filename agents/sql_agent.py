@@ -7,11 +7,35 @@ SQL 查询子智能体
 import asyncio
 import concurrent.futures
 import json
+import logging
+import logging.handlers
 import re
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
+
+import os
+log_dir = Path(__file__).parent.parent / "logs"
+log_dir.mkdir(parents=True, exist_ok=True)
+
+file_handler = logging.handlers.RotatingFileHandler(
+    log_dir / "app.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding='utf-8'
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        file_handler,
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 from langchain_core.language_models import BaseLLM
 from mcp import ClientSession, StdioServerParameters
@@ -324,6 +348,8 @@ class SQLQueryAgent:
         return asyncio.run(coro)
 
     def query(self, question: str, max_retries: int = 3) -> Dict[str, Any]:
+        logger.info(f"SQL Agent 收到查询请求: {question[:50]}...")
+        
         result = {
             "sql": None,
             "data": None,
@@ -333,30 +359,35 @@ class SQLQueryAgent:
 
         try:
             try:
+                logger.info("SQL Agent 正在生成 SQL...")
                 sql = self._generate_sql(question)
+                logger.info(f"SQL Agent 生成的 SQL: {sql[:100]}...")
             except Exception as llm_error:
+                logger.warning("SQL Agent LLM 生成失败，尝试规则匹配...")
                 sql = self._rule_based_sql(question)
                 if not sql:
                     result["error"] = (
                         f"查询失败（LLM 不可用，且未命中规则 SQL）: {str(llm_error)}"
                     )
+                    logger.error(f"SQL Agent 查询失败: {result['error']}")
                     return result
 
             result["sql"] = sql
             if not sql:
                 result["error"] = "未能生成有效的 SQL"
+                logger.error("SQL Agent 未能生成有效的 SQL")
                 return result
 
             for attempt in range(max_retries):
+                logger.info(f"SQL Agent 执行 SQL (尝试 {attempt + 1}/{max_retries})...")
                 query_result = self._run_async(self._execute_sql_via_mcp(sql))
                 result_data = json.loads(query_result)
 
                 if isinstance(result_data, dict) and "error" in result_data:
                     error_msg = result_data["error"]
+                    logger.warning(f"SQL Agent SQL 执行错误: {error_msg}")
                     if attempt < max_retries - 1:
-                        print(
-                            f"[SQL 纠错] 第{attempt + 1}次执行失败: {error_msg}，正在让 LLM 自动修复..."
-                        )
+                        logger.info(f"SQL Agent 第{attempt + 1}次执行失败，正在让 LLM 自动修复...")
                         try:
                             sql = self._correct_sql(question, sql, error_msg, attempt + 1)
                         except Exception:
@@ -376,11 +407,13 @@ class SQLQueryAgent:
                         )
                 else:
                     result["data"] = query_result
+                    logger.info(f"SQL Agent 查询成功")
                     if attempt > 0:
-                        print(f"[SQL 纠错] 第{attempt}次修复后执行成功")
+                        logger.info(f"SQL Agent 第{attempt}次修复后执行成功")
                     break
 
         except Exception as e:
             result["error"] = f"查询失败: {str(e)}"
+            logger.error(f"SQL Agent 异常: {str(e)}")
 
         return result

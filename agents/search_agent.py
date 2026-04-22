@@ -10,10 +10,33 @@ DeepSearch 联网搜索子智能体
 import os
 import re
 import sys
+import logging
+import logging.handlers
 from pathlib import Path
 from typing import Any, Dict, List
 
 from langchain_core.language_models import BaseLLM
+
+log_dir = Path(__file__).parent.parent / "logs"
+log_dir.mkdir(parents=True, exist_ok=True)
+
+file_handler = logging.handlers.RotatingFileHandler(
+    log_dir / "app.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding='utf-8'
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        file_handler,
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 sys.path.append(str(Path(__file__).parent.parent))
 from prompts import get_search_and_sql_prompt, get_search_synthesis_prompt
@@ -167,13 +190,17 @@ class WebSearchAgent:
         return result
 
     def search(self, question: str) -> Dict[str, Any]:
+        logger.info(f"Search Agent 收到搜索请求: {question[:50]}...")
+        
         raw_result = self.search_raw(question)
         if raw_result.get("error"):
+            logger.warning(f"Search Agent 搜索出错: {raw_result['error']}")
             return {
                 "answer": None,
                 "sources": raw_result.get("sources", []),
                 "error": raw_result["error"],
             }
+        logger.info("Search Agent 正在合成搜索结果...")
         return self.synthesize_search(
             question,
             raw_result.get("formatted_text", ""),
@@ -181,13 +208,17 @@ class WebSearchAgent:
         )
 
     def search_and_compare(self, question: str, sql_result_json: str) -> Dict[str, Any]:
+        logger.info(f"Search Agent 收到搜索+SQL对比请求: {question[:50]}...")
+        
         raw_result = self.search_raw(question)
         if raw_result.get("error"):
+            logger.warning(f"Search Agent 搜索出错: {raw_result['error']}")
             return {
                 "answer": None,
                 "sources": raw_result.get("sources", []),
                 "error": raw_result["error"],
             }
+        logger.info("Search Agent 正在合成搜索与SQL对比结果...")
         return self.synthesize_search_and_sql(
             question,
             raw_result.get("formatted_text", ""),

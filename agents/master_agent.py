@@ -7,8 +7,31 @@
 
 import concurrent.futures
 import json
+import logging
+import logging.handlers
 from typing import TypedDict, Sequence, Dict, Any, Optional, Annotated, Generator
 from pathlib import Path
+
+log_dir = Path(__file__).parent.parent / "logs"
+log_dir.mkdir(parents=True, exist_ok=True)
+
+file_handler = logging.handlers.RotatingFileHandler(
+    log_dir / "app.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding='utf-8'
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        file_handler,
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 from langgraph.graph import StateGraph, END, add_messages
 from langgraph.checkpoint.memory import MemorySaver
@@ -671,6 +694,8 @@ class MasterAgent:
         Returns:
             回答结果
         """
+        logger.info(f"Master Agent 收到问题: {question[:50]}...")
+        
         initial_state = {
             "messages": [HumanMessage(content=question)],
             "user_question": question,
@@ -689,6 +714,7 @@ class MasterAgent:
         # 使用checkpointer保存会话状态
         config = {"configurable": {"thread_id": thread_id}}
         
+        logger.info("Master Agent 正在处理...")
         final_state = self.graph.invoke(initial_state, config)
         
         answer = final_state.get("final_answer", "抱歉，无法处理你的问题。")
@@ -696,7 +722,8 @@ class MasterAgent:
         # 获取完整的对话历史（已经包含了当前的问题和回答）
         all_messages = list(final_state["messages"])
         
-        print(f"[记忆] 当前会话共有 {len(all_messages)} 条消息")
+        logger.info(f"Master Agent 处理完成，回答长度: {len(answer)} 字符")
+        logger.info(f"Master Agent 当前会话共有 {len(all_messages)} 条消息")
         
         # 自动提取并保存长期记忆
         if user_id:
