@@ -387,6 +387,19 @@ def health():
 
 
 if __name__ == '__main__':
+    # 检查并初始化数据库
+    db_path = Path(__file__).parent / "data" / "company.db"
+    if not db_path.exists():
+        print("检测到数据库文件不存在，正在初始化...")
+        try:
+            from data.init_db import init_database
+            init_database()
+            print("数据库初始化完成")
+        except Exception as e:
+            print(f"数据库初始化失败: {e}")
+    else:
+        print(f"数据库已存在: {db_path}")
+    
     # 检查环境变量
     if not os.getenv("OPENAI_API_KEY"):
         print("错误：未设置 OPENAI_API_KEY（可放在 .env 中）")

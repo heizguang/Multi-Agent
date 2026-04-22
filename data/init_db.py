@@ -286,14 +286,16 @@ def insert_sample_data(conn):
 
 def main():
     """主函数"""
-    
-    # 连接数据库（如果不存在会自动创建）
+    init_database()
+
+
+def init_database():
+    """初始化数据库（供外部调用）"""
     conn = sqlite3.connect(DATABASE_PATH)
     
     create_tables(conn)
     insert_sample_data(conn)
     
-    # VACUUM需要在事务外执行
     conn.commit()
     conn.execute('VACUUM')
     conn.close()
