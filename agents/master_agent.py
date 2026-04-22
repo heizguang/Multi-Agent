@@ -234,6 +234,9 @@ class MasterAgent:
         # 会话数据存储：保存每个thread_id的最近查询结果
         self.session_data = {}
         
+        # 结果缓存（问题摘要 -> 回答），避免重复查询
+        self._cache = {}
+        
         # 构建工作流
         self.graph = self._build_graph()
     
@@ -393,14 +396,22 @@ class MasterAgent:
         return "\n\n".join(context_parts) if context_parts else ""
     
     def _intent_node(self, state: MasterAgentState) -> MasterAgentState:
-        """意图识别节点（支持6种意图）"""
+        """意图识别节点（支持6种意图）- 使用规则+LLM混合策略"""
         question = state["user_question"]
         user_id = state["metadata"].get("user_id")
         
-        # 获取对话历史（短期记忆）
+        # 先用规则快速判断意图
+        rule_intent = self._rule_based_intent(question)
+        
+        # 如果规则能明确判断（不是simple_answer），直接使用
+        if rule_intent != "simple_answer":
+            state["intent"] = rule_intent
+            state["metadata"]["intent_source"] = "rule"
+            return state
+        
+        # 规则无法明确判断，调用LLM识别
         conversation_history = self._get_conversation_history(state)
         
-        # 获取用户知识（长期记忆）
         user_context = ""
         if user_id:
             try:
@@ -408,7 +419,7 @@ class MasterAgent:
                 preferences = self.long_term_memory.get_all_preferences(user_id)
                 user_context = self._format_long_term_context(knowledge, preferences)
             except Exception as e:
-                print(f"获取长期记忆失败: {e}")
+                logger.warning(f"获取长期记忆失败: {e}")
         
         prompt = get_master_intent_prompt(question, conversation_history, user_context)
         
@@ -426,21 +437,17 @@ class MasterAgent:
                         intent = valid_intent
                         break
                 else:
-                    intent = self._rule_based_intent(question)
-
-            # LLM 有时会误判为 simple_answer，这里用规则做最后兜底
-            if intent == "simple_answer":
-                rule_intent = self._rule_based_intent(question)
-                if rule_intent != "simple_answer":
                     intent = rule_intent
-            
+
             state["intent"] = intent
             state["metadata"]["intent_response"] = response
+            state["metadata"]["intent_source"] = "llm"
             
         except Exception as e:
-            fallback_intent = self._rule_based_intent(question)
+            fallback_intent = rule_intent
             state["intent"] = fallback_intent
             state["metadata"]["intent_error"] = str(e)
+            state["metadata"]["intent_source"] = "fallback"
         
         return state
     
@@ -524,12 +531,15 @@ class MasterAgent:
         return state
     
     def _call_both_node(self, state: MasterAgentState) -> MasterAgentState:
-        """先调用SQL查询，再调用数据分析"""
+        """并行执行SQL查询和数据分析"""
         question = state["user_question"]
         thread_id = state["metadata"].get("thread_id", "default")
         
         try:
-            sql_result, search_result = self._run_search_and_sql_parallel(question)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                sql_future = pool.submit(self.sql_agent.query, question)
+                sql_result = sql_future.result()
+            
             state["sql_result"] = sql_result
             state["metadata"]["sql_result"] = sql_result
             
@@ -542,12 +552,14 @@ class MasterAgent:
                 return state
             
             if sql_result.get("data"):
-                analysis_result = self.analysis_agent.analyze(sql_result["data"], question)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    analysis_future = pool.submit(self.analysis_agent.analyze, sql_result["data"], question)
+                    analysis_result = analysis_future.result()
+                
                 state["analysis_result"] = analysis_result
                 state["metadata"]["analysis_result"] = analysis_result
                 
                 if analysis_result.get("error"):
-                    # 保留 SQL 结果继续回答，避免整链路因分析失败中断
                     state["metadata"]["analysis_warning"] = analysis_result["error"]
             else:
                 state["error"] = "查询结果为空，无法进行分析"
@@ -696,6 +708,12 @@ class MasterAgent:
         """
         logger.info(f"Master Agent 收到问题: {question[:50]}...")
         
+        # 简单缓存：基于问题前50个字符的hash
+        cache_key = hash(question[:50])
+        if cache_key in self._cache:
+            logger.info("命中缓存，直接返回结果")
+            return self._cache[cache_key]
+        
         initial_state = {
             "messages": [HumanMessage(content=question)],
             "user_question": question,
@@ -728,6 +746,10 @@ class MasterAgent:
         # 自动提取并保存长期记忆
         if user_id:
             self._extract_and_save_memory(all_messages, user_id)
+        
+        # 缓存结果（限制缓存大小）
+        if len(self._cache) < 100:
+            self._cache[cache_key] = answer
         
         return answer
     

@@ -8,6 +8,7 @@ import json
 import logging
 import logging.handlers
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
@@ -291,26 +292,36 @@ class DataAnalysisAgent:
             
             data_summary = self._prepare_data_summary(parsed_data)
             
-            # 文字分析
-            logger.info("Analysis Agent 正在生成文字分析...")
-            try:
-                prompt = get_analysis_prompt(
-                    data_summary=data_summary,
-                    raw_data=data,
-                    context=context
-                )
-                analysis = self._llm_to_str(self.llm.invoke(prompt))
-            except Exception:
-                analysis = self._fallback_analysis(parsed_data, context)
-            result["analysis"] = analysis
+            def run_text_analysis():
+                logger.info("Analysis Agent 正在生成文字分析...")
+                try:
+                    prompt = get_analysis_prompt(
+                        data_summary=data_summary,
+                        raw_data=data,
+                        context=context
+                    )
+                    return self._llm_to_str(self.llm.invoke(prompt))
+                except Exception:
+                    return self._fallback_analysis(parsed_data, context)
             
-            # ECharts 图表配置（仅对适合可视化的数据生成）
-            if self._should_generate_chart(parsed_data):
-                logger.info("Analysis Agent 正在生成图表配置...")
-                chart_config = self._generate_chart_config(parsed_data, data_summary, context)
-                if not chart_config:
-                    chart_config = self._fallback_chart_config(parsed_data, context)
-                result["chart"] = chart_config
+            def run_chart_generation():
+                if self._should_generate_chart(parsed_data):
+                    logger.info("Analysis Agent 正在生成图表配置...")
+                    try:
+                        chart_config = self._generate_chart_config(parsed_data, data_summary, context)
+                        if not chart_config:
+                            return self._fallback_chart_config(parsed_data, context)
+                        return chart_config
+                    except Exception:
+                        return None
+                return None
+            
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                analysis_future = executor.submit(run_text_analysis)
+                chart_future = executor.submit(run_chart_generation)
+                
+                result["analysis"] = analysis_future.result()
+                result["chart"] = chart_future.result()
             
         except Exception as e:
             result["error"] = f"分析失败: {str(e)}"
