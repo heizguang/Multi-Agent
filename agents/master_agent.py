@@ -10,6 +10,8 @@ import json
 import logging
 import logging.handlers
 import re
+import shutil
+import threading
 import time
 from typing import TypedDict, Sequence, Dict, Any, Optional, Annotated, Generator, List
 from pathlib import Path
@@ -204,7 +206,11 @@ class MasterAgent:
     def __init__(self, llm: BaseLLM, db_path: str, num_examples: int = 3, 
                 memory_db_path: str = "./data/long_term_memory.db",
                 short_term_max_tokens: int = 1000,
-                tavily_api_key: str = ""):
+                tavily_api_key: str = "",
+                cache_store_path: str = "./data/query_cache.json",
+                session_store_path: str = "./data/session_state.json",
+                conversation_store_path: str = "./data/conversation_state.json",
+                max_persisted_messages: int = 24):
         """初始化主智能体
         
         Args:
@@ -218,6 +224,11 @@ class MasterAgent:
         self.llm = llm
         self.db_path = db_path
         self.short_term_max_tokens = short_term_max_tokens
+        self.max_persisted_messages = max_persisted_messages
+        self.cache_store_path = Path(cache_store_path)
+        self.session_store_path = Path(session_store_path)
+        self.conversation_store_path = Path(conversation_store_path)
+        self._persistence_lock = threading.Lock()
         
         # 初始化子智能体
         self.sql_agent = SQLQueryAgent(llm, db_path, num_examples)
@@ -239,9 +250,153 @@ class MasterAgent:
         
         # 结果缓存（问题关键词 -> 结构化缓存项列表）
         self._cache = {}
+        self._conversation_store: Dict[str, List[Dict[str, str]]] = {}
+        self._load_persistent_state()
         
         # 构建工作流
         self.graph = self._build_graph()
+
+    def _read_json_file(self, path: Path, default: Any) -> Any:
+        if not path.exists():
+            return default
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"加载持久化文件失败: {path} - {e}")
+            return default
+
+    def _write_json_file(self, path: Path, payload: Any) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        with self._persistence_lock:
+            with temp_path.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            temp_path.replace(path)
+
+    def _load_persistent_state(self) -> None:
+        cache_data = self._read_json_file(self.cache_store_path, {})
+        if isinstance(cache_data, dict):
+            self._cache = {
+                str(key): value
+                for key, value in cache_data.items()
+                if isinstance(value, list)
+            }
+
+        session_data = self._read_json_file(self.session_store_path, {})
+        if isinstance(session_data, dict):
+            self.session_data = {
+                str(key): value
+                for key, value in session_data.items()
+                if isinstance(value, dict)
+            }
+
+        conversation_data = self._read_json_file(self.conversation_store_path, {})
+        if isinstance(conversation_data, dict):
+            self._conversation_store = {
+                str(key): value
+                for key, value in conversation_data.items()
+                if isinstance(value, list)
+            }
+
+    def _save_cache_to_disk(self) -> None:
+        if self.cache_store_path.exists():
+            snapshot_dir = self.cache_store_path.parent / "cache_snapshots"
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            snapshot_path = snapshot_dir / f"{self.cache_store_path.stem}_{timestamp}{self.cache_store_path.suffix}"
+            if not snapshot_path.exists():
+                shutil.copy2(self.cache_store_path, snapshot_path)
+        self._write_json_file(self.cache_store_path, self._cache)
+
+    def _save_session_data_to_disk(self) -> None:
+        self._write_json_file(self.session_store_path, self.session_data)
+
+    def _save_conversation_store_to_disk(self) -> None:
+        self._write_json_file(self.conversation_store_path, self._conversation_store)
+
+    def _serialize_message(self, message: BaseMessage) -> Optional[Dict[str, str]]:
+        if isinstance(message, HumanMessage):
+            role = "human"
+        elif isinstance(message, AIMessage):
+            role = "ai"
+        else:
+            return None
+
+        content = getattr(message, "content", "")
+        if isinstance(content, list):
+            try:
+                content = json.dumps(content, ensure_ascii=False)
+            except Exception:
+                content = str(content)
+        elif not isinstance(content, str):
+            content = str(content)
+
+        return {"role": role, "content": content}
+
+    def _deserialize_messages(self, records: Any) -> List[BaseMessage]:
+        messages: List[BaseMessage] = []
+        if not isinstance(records, list):
+            return messages
+
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            content = item.get("content", "")
+            if not isinstance(content, str):
+                content = str(content)
+
+            if role == "human":
+                messages.append(HumanMessage(content=content))
+            elif role == "ai":
+                messages.append(AIMessage(content=content))
+
+        return messages
+
+    def _get_persisted_messages(self, thread_id: str) -> List[BaseMessage]:
+        return self._deserialize_messages(self._conversation_store.get(thread_id, []))
+
+    def _save_conversation_messages(self, thread_id: str, messages: Sequence[BaseMessage]) -> None:
+        serialized: List[Dict[str, str]] = []
+        for message in list(messages)[-self.max_persisted_messages:]:
+            record = self._serialize_message(message)
+            if record:
+                serialized.append(record)
+
+        self._conversation_store[thread_id] = serialized
+        self._save_conversation_store_to_disk()
+
+    def _get_checkpoint_messages(self, config: Dict[str, Any]) -> List[BaseMessage]:
+        try:
+            snapshot = self.graph.get_state(config)
+            if snapshot and snapshot.values:
+                return list(snapshot.values.get("messages", []))
+        except Exception:
+            pass
+        return []
+
+    def _remember_last_sql_result(self, thread_id: str, result: Dict[str, Any]) -> None:
+        if thread_id not in self.session_data:
+            self.session_data[thread_id] = {}
+        self.session_data[thread_id]["last_sql_result"] = result
+        self._save_session_data_to_disk()
+
+    def _remember_conversation_turn(self, thread_id: str, question: str, answer: str) -> None:
+        config = {"configurable": {"thread_id": thread_id}}
+        new_messages = [HumanMessage(content=question), AIMessage(content=answer)]
+        checkpoint_messages = self._get_checkpoint_messages(config)
+        persisted_messages = checkpoint_messages or self._get_persisted_messages(thread_id)
+        self._save_conversation_messages(thread_id, persisted_messages + new_messages)
+
+        try:
+            self.graph.update_state(
+                config,
+                {"messages": new_messages},
+                as_node="summarize"
+            )
+        except Exception:
+            pass
     
     def _extract_departments(self, text: str) -> List[str]:
         """提取问题中的部门，并统一规范到“XX部”格式。"""
@@ -267,6 +422,22 @@ class MasterAgent:
                 found.append(dept_name)
 
         for alias, canonical in dept_aliases.items():
+            if alias in text and canonical not in found:
+                found.append(canonical)
+
+        return found
+
+    def _extract_cities(self, text: str) -> List[str]:
+        """Extract city names from the question."""
+        city_aliases = {
+            "北京": "北京",
+            "上海": "上海",
+            "广州": "广州",
+            "深圳": "深圳",
+        }
+
+        found: List[str] = []
+        for alias, canonical in city_aliases.items():
             if alias in text and canonical not in found:
                 found.append(canonical)
 
@@ -529,9 +700,604 @@ class MasterAgent:
         ]
         existing_entries.insert(0, cache_entry)
         self._cache[cache_key] = existing_entries[:3]
+        self._save_cache_to_disk()
 
         logger.info(f"结果已加入缓存: {cache_key}")
     
+    def _extract_cities(self, text: str) -> List[str]:
+        """提取问题中的城市。"""
+        city_aliases = {
+            "北京": "北京",
+            "上海": "上海",
+            "广州": "广州",
+            "深圳": "深圳",
+        }
+
+        found: List[str] = []
+        for alias, canonical in city_aliases.items():
+            if alias in text and canonical not in found:
+                found.append(canonical)
+
+        return found
+
+    def _build_cache_metadata(self, question: str) -> Dict[str, Any]:
+        """构建缓存匹配所需的关键词和结构化元数据。"""
+        q = question.lower()
+        departments = self._extract_departments(question)
+        cities = self._extract_cities(question)
+        department_tokens = [
+            dept[:-1] if dept.endswith("部") else dept for dept in departments
+        ]
+
+        keywords = list(department_tokens) + list(cities)
+        matched_actions: List[str] = []
+
+        actions = ["平均", "最高", "最低", "总", "排名", "统计", "查询", "对比", "分析"]
+        for action in actions:
+            if action in q:
+                keywords.append(action)
+                matched_actions.append(action)
+
+        salary_related = "薪资" in q or "工资" in q or "收入" in q
+        if salary_related:
+            keywords.append("薪资")
+
+        if not keywords:
+            keywords = [q[:10]]
+
+        return {
+            "cache_key": "|".join(keywords),
+            "departments": departments,
+            "cities": cities,
+            "department_tokens": department_tokens,
+            "actions": matched_actions,
+            "salary_related": salary_related,
+        }
+
+    def _normalize_city_value(self, value: Any) -> str:
+        """将数据中的城市值归一化。"""
+        if not isinstance(value, str):
+            return ""
+
+        normalized = value.strip()
+        alias_map = {
+            "北京市": "北京",
+            "上海市": "上海",
+            "广州市": "广州",
+            "深圳市": "深圳",
+            "北京": "北京",
+            "上海": "上海",
+            "广州": "广州",
+            "深圳": "深圳",
+        }
+        return alias_map.get(normalized, normalized)
+
+    def _filter_cached_sql_data(
+        self,
+        sql_data: Any,
+        requested_departments: List[str],
+        requested_cities: Optional[List[str]] = None,
+    ) -> Optional[Any]:
+        """按当前问题中的部门/城市，从缓存 SQL 结果里筛出真正需要的数据。"""
+        parsed = self._parse_cached_sql_data(sql_data)
+        if parsed is None:
+            return None
+
+        requested_cities = requested_cities or []
+        if not requested_departments and not requested_cities:
+            return parsed
+
+        requested_dept_set = set(requested_departments)
+        requested_dept_roots = {
+            dept[:-1] if dept.endswith("部") else dept for dept in requested_departments
+        }
+        requested_city_set = set(requested_cities)
+
+        if isinstance(parsed, dict) and isinstance(parsed.get("rows"), list):
+            filtered_rows = self._filter_cached_sql_data(
+                parsed["rows"],
+                requested_departments,
+                requested_cities,
+            )
+            if filtered_rows is None:
+                return None
+            filtered_payload = dict(parsed)
+            filtered_payload["rows"] = filtered_rows
+            return filtered_payload
+
+        if not isinstance(parsed, list):
+            return None
+
+        filtered_rows = []
+        matched_any_department = False
+        matched_any_city = False
+
+        for row in parsed:
+            if not isinstance(row, dict):
+                continue
+
+            department_match = not requested_departments
+            city_match = not requested_cities
+
+            for key, value in row.items():
+                key_text = str(key).lower()
+
+                if requested_departments:
+                    normalized_dept = self._normalize_department_value(value)
+                    dept_root = (
+                        normalized_dept[:-1]
+                        if normalized_dept.endswith("部")
+                        else normalized_dept
+                    )
+                    if "dept" in key_text or "department" in key_text or "部门" in str(key):
+                        matched_any_department = True
+                        if (
+                            normalized_dept in requested_dept_set
+                            or dept_root in requested_dept_roots
+                        ):
+                            department_match = True
+
+                if requested_cities:
+                    normalized_city = self._normalize_city_value(value)
+                    if "city" in key_text or "location" in key_text or "城市" in str(key) or "地区" in str(key):
+                        matched_any_city = True
+                        if normalized_city in requested_city_set:
+                            city_match = True
+
+            if requested_departments and not department_match:
+                for value in row.values():
+                    normalized_dept = self._normalize_department_value(value)
+                    dept_root = (
+                        normalized_dept[:-1]
+                        if normalized_dept.endswith("部")
+                        else normalized_dept
+                    )
+                    if (
+                        normalized_dept in requested_dept_set
+                        or dept_root in requested_dept_roots
+                    ):
+                        department_match = True
+                        break
+
+            if requested_cities and not city_match:
+                for value in row.values():
+                    normalized_city = self._normalize_city_value(value)
+                    if normalized_city in requested_city_set:
+                        city_match = True
+                        break
+
+            if department_match and city_match:
+                filtered_rows.append(row)
+
+        if requested_departments and matched_any_department and not filtered_rows:
+            return None
+        if requested_cities and matched_any_city and not filtered_rows:
+            return None
+        if filtered_rows:
+            return filtered_rows
+        return None
+
+    def _rebuild_cached_answer(self, question: str, cache_entry: Dict[str, Any]) -> Optional[str]:
+        """对可复用缓存按当前问题裁剪数据后重建回答。"""
+        requested_departments = self._extract_departments(question)
+        requested_cities = self._extract_cities(question)
+        sql_result = cache_entry.get("sql_result") or {}
+        filtered_sql_data = self._filter_cached_sql_data(
+            sql_result.get("data"),
+            requested_departments,
+            requested_cities,
+        )
+        if filtered_sql_data is None:
+            return None
+
+        serialized_sql = json.dumps(filtered_sql_data, ensure_ascii=False)
+        summary_prompt = get_summary_prompt(
+            question=question,
+            sql_result=serialized_sql,
+            analysis_result=None,
+        )
+
+        try:
+            answer = self._llm_to_str(self.llm.invoke(summary_prompt)).strip()
+            if answer:
+                return answer
+        except Exception as e:
+            logger.warning(f"缓存命中后二次生成回答失败，使用兜底总结: {e}")
+
+        return self._fallback_summary(question, serialized_sql, None)
+
+    def _find_cached_answer(self, question: str) -> str | None:
+        """从缓存中查找可安全复用的回答。"""
+        metadata = self._build_cache_metadata(question)
+        cache_key = metadata["cache_key"]
+
+        logger.info(f"缓存查找 - 问题: {question[:20]}, key: {cache_key}")
+
+        if cache_key in self._cache:
+            entries = self._cache[cache_key]
+            for entry in entries:
+                if entry.get("question") == question and entry.get("answer"):
+                    logger.info(f"精确问题命中缓存: {cache_key}")
+                    return entry["answer"]
+
+            for entry in entries:
+                if entry.get("answer"):
+                    logger.info(f"精确 key 命中缓存: {cache_key}")
+                    return entry["answer"]
+
+        requested_departments = set(metadata["departments"])
+        requested_cities = set(metadata.get("cities", []))
+        requested_actions = set(metadata["actions"])
+        salary_related = metadata["salary_related"]
+
+        if requested_departments or requested_cities:
+            for cached_entries in self._cache.values():
+                for entry in cached_entries:
+                    cached_departments = set(entry.get("departments", []))
+                    cached_cities = set(entry.get("cities", []))
+
+                    if requested_departments and not requested_departments.issubset(cached_departments):
+                        continue
+                    if requested_cities and not requested_cities.issubset(cached_cities):
+                        continue
+                    if requested_actions != set(entry.get("actions", [])):
+                        continue
+                    if salary_related != entry.get("salary_related", False):
+                        continue
+
+                    rebuilt_answer = self._rebuild_cached_answer(question, entry)
+                    if rebuilt_answer:
+                        logger.info("命中可裁剪缓存，已按当前问题过滤后重建回答")
+                        return rebuilt_answer
+
+        logger.info(f"当前缓存keys: {list(self._cache.keys())}")
+        logger.info("缓存未命中")
+        return None
+
+    def _add_to_cache(
+        self,
+        question: str,
+        answer: str,
+        intent: Optional[str] = None,
+        sql_result: Optional[Dict[str, Any]] = None,
+        analysis_result: Optional[Dict[str, Any]] = None,
+        search_result: Optional[Dict[str, Any]] = None,
+    ):
+        """将结果添加到缓存。"""
+        metadata = self._build_cache_metadata(question)
+        cache_key = metadata["cache_key"]
+
+        cache_entry = {
+            "question": question,
+            "answer": answer,
+            "intent": intent,
+            "sql_result": sql_result,
+            "analysis_result": analysis_result,
+            "search_result": search_result,
+            "departments": metadata["departments"],
+            "cities": metadata.get("cities", []),
+            "actions": metadata["actions"],
+            "salary_related": metadata["salary_related"],
+        }
+
+        existing_entries = self._cache.get(cache_key, [])
+        existing_entries = [
+            entry for entry in existing_entries if entry.get("question") != question
+        ]
+        existing_entries.insert(0, cache_entry)
+        self._cache[cache_key] = existing_entries[:3]
+        self._save_cache_to_disk()
+
+        logger.info(f"结果已加入缓存: {cache_key}")
+
+    def _get_cache_dimension_specs(self) -> Dict[str, Dict[str, Any]]:
+        """定义可裁剪缓存的维度配置。新增维度时只需扩展这里。"""
+        return {
+            "departments": {
+                "extractor": self._extract_departments,
+                "normalizer": self._normalize_department_value,
+                "field_keywords": ["dept", "department", "部门"],
+            },
+            "cities": {
+                "extractor": self._extract_cities,
+                "normalizer": self._normalize_city_value,
+                "field_keywords": ["city", "location", "城市", "地区"],
+            },
+        }
+
+    def _extract_cache_dimensions(self, text: str) -> Dict[str, List[str]]:
+        dimensions: Dict[str, List[str]] = {}
+        for name, spec in self._get_cache_dimension_specs().items():
+            values = spec["extractor"](text)
+            if values:
+                dimensions[name] = values
+        return dimensions
+
+    def _normalize_city_value(self, value: Any) -> str:
+        """将数据中的城市值归一化。"""
+        if not isinstance(value, str):
+            return ""
+
+        normalized = value.strip()
+        alias_map = {
+            "北京市": "北京",
+            "上海市": "上海",
+            "广州市": "广州",
+            "深圳市": "深圳",
+            "北京": "北京",
+            "上海": "上海",
+            "广州": "广州",
+            "深圳": "深圳",
+        }
+        return alias_map.get(normalized, normalized)
+
+    def _normalize_dimension_target(self, dimension: str, value: str) -> str:
+        spec = self._get_cache_dimension_specs().get(dimension)
+        if not spec:
+            return value
+        normalizer = spec["normalizer"]
+        normalized = normalizer(value)
+        return normalized or value
+
+    def _get_entry_dimensions(self, entry: Dict[str, Any]) -> Dict[str, List[str]]:
+        dimensions = entry.get("dimensions")
+        if isinstance(dimensions, dict):
+            return {
+                str(key): [str(v) for v in values if isinstance(v, str)]
+                for key, values in dimensions.items()
+                if isinstance(values, list)
+            }
+
+        fallback: Dict[str, List[str]] = {}
+        for key in self._get_cache_dimension_specs().keys():
+            values = entry.get(key)
+            if isinstance(values, list):
+                fallback[key] = [str(v) for v in values if isinstance(v, str)]
+        return fallback
+
+    def _build_cache_metadata(self, question: str) -> Dict[str, Any]:
+        """构建缓存匹配所需的关键词和结构化元数据。"""
+        q = question.lower()
+        dimensions = self._extract_cache_dimensions(question)
+        keywords: List[str] = []
+
+        for dimension_values in dimensions.values():
+            keywords.extend(dimension_values)
+
+        matched_actions: List[str] = []
+        actions = ["平均", "最高", "最低", "总", "排名", "统计", "查询", "对比", "分析"]
+        for action in actions:
+            if action in q:
+                keywords.append(action)
+                matched_actions.append(action)
+
+        salary_related = "薪资" in q or "工资" in q or "收入" in q
+        if salary_related:
+            keywords.append("薪资")
+
+        if not keywords:
+            keywords = [q[:10]]
+
+        return {
+            "cache_key": "|".join(keywords),
+            "dimensions": dimensions,
+            "departments": dimensions.get("departments", []),
+            "cities": dimensions.get("cities", []),
+            "actions": matched_actions,
+            "salary_related": salary_related,
+        }
+
+    def _filter_cached_sql_data(
+        self,
+        sql_data: Any,
+        requested_dimensions: Dict[str, List[str]],
+    ) -> Optional[Any]:
+        """按当前问题维度从缓存 SQL 结果中裁剪有效数据。"""
+        parsed = self._parse_cached_sql_data(sql_data)
+        if parsed is None:
+            return None
+
+        active_dimensions = {
+            name: values for name, values in requested_dimensions.items() if values
+        }
+        if not active_dimensions:
+            return parsed
+
+        if isinstance(parsed, dict) and isinstance(parsed.get("rows"), list):
+            filtered_rows = self._filter_cached_sql_data(parsed["rows"], active_dimensions)
+            if filtered_rows is None:
+                return None
+            filtered_payload = dict(parsed)
+            filtered_payload["rows"] = filtered_rows
+            return filtered_payload
+
+        if not isinstance(parsed, list):
+            return None
+
+        specs = self._get_cache_dimension_specs()
+        normalized_targets = {
+            name: {
+                self._normalize_dimension_target(name, value)
+                for value in values
+                if isinstance(value, str) and value
+            }
+            for name, values in active_dimensions.items()
+        }
+        matched_by_key = {name: False for name in active_dimensions}
+        filtered_rows = []
+
+        for row in parsed:
+            if not isinstance(row, dict):
+                continue
+
+            row_match = True
+            for dimension, targets in normalized_targets.items():
+                spec = specs.get(dimension)
+                if not spec or not targets:
+                    continue
+
+                normalizer = spec["normalizer"]
+                field_keywords = spec["field_keywords"]
+                explicit_match = False
+                fallback_match = False
+                saw_dimension_key = False
+
+                for key, value in row.items():
+                    key_text = str(key).lower()
+                    normalized_value = normalizer(value)
+                    if not normalized_value:
+                        continue
+
+                    if any(keyword in key_text or keyword in str(key) for keyword in field_keywords):
+                        saw_dimension_key = True
+                        matched_by_key[dimension] = True
+                        if normalized_value in targets:
+                            explicit_match = True
+                            break
+
+                if not explicit_match:
+                    for value in row.values():
+                        normalized_value = normalizer(value)
+                        if normalized_value and normalized_value in targets:
+                            fallback_match = True
+                            break
+
+                dimension_match = explicit_match if saw_dimension_key else fallback_match
+                if not dimension_match:
+                    row_match = False
+                    break
+
+            if row_match:
+                filtered_rows.append(row)
+
+        for dimension in active_dimensions:
+            if matched_by_key.get(dimension) and not filtered_rows:
+                return None
+
+        return filtered_rows or None
+
+    def _rebuild_cached_answer(self, question: str, cache_entry: Dict[str, Any]) -> Optional[str]:
+        """对可复用缓存按当前维度裁剪数据后重建回答。"""
+        metadata = self._build_cache_metadata(question)
+        sql_result = cache_entry.get("sql_result") or {}
+        filtered_sql_data = self._filter_cached_sql_data(
+            sql_result.get("data"),
+            metadata["dimensions"],
+        )
+        if filtered_sql_data is None:
+            return None
+
+        serialized_sql = json.dumps(filtered_sql_data, ensure_ascii=False)
+        summary_prompt = get_summary_prompt(
+            question=question,
+            sql_result=serialized_sql,
+            analysis_result=None,
+        )
+
+        try:
+            answer = self._llm_to_str(self.llm.invoke(summary_prompt)).strip()
+            if answer:
+                return answer
+        except Exception as e:
+            logger.warning(f"缓存命中后二次生成回答失败，使用兜底总结: {e}")
+
+        return self._fallback_summary(question, serialized_sql, None)
+
+    def _find_cached_answer(self, question: str) -> str | None:
+        """从缓存中查找可安全复用的回答。"""
+        metadata = self._build_cache_metadata(question)
+        cache_key = metadata["cache_key"]
+
+        logger.info(f"缓存查找 - 问题: {question[:20]}, key: {cache_key}")
+
+        if cache_key in self._cache:
+            entries = self._cache[cache_key]
+            for entry in entries:
+                if entry.get("question") == question and entry.get("answer"):
+                    logger.info(f"精确问题命中缓存: {cache_key}")
+                    return entry["answer"]
+
+            for entry in entries:
+                if entry.get("answer"):
+                    logger.info(f"精确 key 命中缓存: {cache_key}")
+                    return entry["answer"]
+
+        requested_dimensions = metadata["dimensions"]
+        requested_actions = set(metadata["actions"])
+        salary_related = metadata["salary_related"]
+
+        if requested_dimensions:
+            for cached_entries in self._cache.values():
+                for entry in cached_entries:
+                    cached_dimensions = self._get_entry_dimensions(entry)
+
+                    dimensions_match = True
+                    for dimension, requested_values in requested_dimensions.items():
+                        cached_values = {
+                            self._normalize_dimension_target(dimension, value)
+                            for value in cached_dimensions.get(dimension, [])
+                        }
+                        normalized_requested = {
+                            self._normalize_dimension_target(dimension, value)
+                            for value in requested_values
+                        }
+                        if not normalized_requested.issubset(cached_values):
+                            dimensions_match = False
+                            break
+
+                    if not dimensions_match:
+                        continue
+                    if requested_actions != set(entry.get("actions", [])):
+                        continue
+                    if salary_related != entry.get("salary_related", False):
+                        continue
+
+                    rebuilt_answer = self._rebuild_cached_answer(question, entry)
+                    if rebuilt_answer:
+                        logger.info("命中可裁剪缓存，已按当前维度过滤后重建回答")
+                        return rebuilt_answer
+
+        logger.info(f"当前缓存keys: {list(self._cache.keys())}")
+        logger.info("缓存未命中")
+        return None
+
+    def _add_to_cache(
+        self,
+        question: str,
+        answer: str,
+        intent: Optional[str] = None,
+        sql_result: Optional[Dict[str, Any]] = None,
+        analysis_result: Optional[Dict[str, Any]] = None,
+        search_result: Optional[Dict[str, Any]] = None,
+    ):
+        """将结果添加到缓存。"""
+        metadata = self._build_cache_metadata(question)
+        cache_key = metadata["cache_key"]
+
+        cache_entry = {
+            "question": question,
+            "answer": answer,
+            "intent": intent,
+            "sql_result": sql_result,
+            "analysis_result": analysis_result,
+            "search_result": search_result,
+            "dimensions": metadata["dimensions"],
+            "departments": metadata.get("departments", []),
+            "cities": metadata.get("cities", []),
+            "actions": metadata["actions"],
+            "salary_related": metadata["salary_related"],
+        }
+
+        existing_entries = self._cache.get(cache_key, [])
+        existing_entries = [
+            entry for entry in existing_entries if entry.get("question") != question
+        ]
+        existing_entries.insert(0, cache_entry)
+        self._cache[cache_key] = existing_entries[:3]
+        self._save_cache_to_disk()
+
+        logger.info(f"结果已加入缓存: {cache_key}")
+
     def _build_graph(self) -> StateGraph:
         """构建LangGraph状态图（支持6种意图路由）"""
         workflow = StateGraph(MasterAgentState)
@@ -686,6 +1452,194 @@ class MasterAgent:
             context_parts.append("相关背景：\n" + "\n".join(know_lines))
         
         return "\n\n".join(context_parts) if context_parts else ""
+
+    def _get_session_memory_facts(
+        self,
+        thread_id: str,
+        limit: int = 6,
+    ) -> List[Dict[str, Any]]:
+        """Return recent fact memories stored for the current thread."""
+        thread_state = self.session_data.get(thread_id, {})
+        if not isinstance(thread_state, dict):
+            return []
+
+        facts = thread_state.get("memory_facts", [])
+        if not isinstance(facts, list):
+            return []
+
+        cleaned: List[Dict[str, Any]] = []
+        for item in facts:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question", "")).strip()
+            answer = str(item.get("answer", "")).strip()
+            if not question or not answer:
+                continue
+            cleaned.append(item)
+
+        return cleaned[:limit]
+
+    def _format_memory_facts(self, facts: List[Dict[str, Any]], limit: int = 5) -> str:
+        """Format stored fact memories for prompting."""
+        sections: List[str] = []
+        for index, fact in enumerate(facts[:limit], start=1):
+            question = str(fact.get("question", "")).strip()
+            answer = str(fact.get("answer", "")).strip()
+            if not question or not answer:
+                continue
+            sections.append(f"{index}. 问题：{question}\n答案：{answer}")
+        return "\n\n".join(sections)
+
+    def _remember_answer_fact(
+        self,
+        thread_id: str,
+        question: str,
+        answer: str,
+        intent: Optional[str] = None,
+        user_id: Optional[str] = None,
+        sql_result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist resolved answers as reusable memory facts."""
+        clean_question = question.strip()
+        clean_answer = answer.strip()
+        if not clean_question or not clean_answer:
+            return
+
+        thread_state = self.session_data.setdefault(thread_id, {})
+        existing_facts = thread_state.get("memory_facts", [])
+        if not isinstance(existing_facts, list):
+            existing_facts = []
+
+        fact_record = {
+            "question": clean_question,
+            "answer": clean_answer,
+            "intent": intent or "",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        deduped = [
+            item
+            for item in existing_facts
+            if isinstance(item, dict) and item.get("question") != clean_question
+        ]
+        thread_state["memory_facts"] = [fact_record] + deduped[:7]
+        self._save_session_data_to_disk()
+
+        if not user_id:
+            return
+
+        memory_intents = {"sql_only", "sql_and_analysis", "analysis_only", "memory_answer", "cache_answer"}
+        if intent not in memory_intents:
+            return
+
+        if sql_result and isinstance(sql_result, dict) and sql_result.get("error"):
+            return
+
+        memory_content = f"问题：{clean_question}\n结论：{clean_answer}"
+        try:
+            self.long_term_memory.save_knowledge(
+                user_id,
+                "dialogue_fact",
+                memory_content,
+                confidence=0.92 if intent in {"sql_only", "sql_and_analysis"} else 0.85,
+            )
+        except Exception as e:
+            logger.warning(f"保存对话事实记忆失败: {e}")
+
+    def _build_memory_answer_context(
+        self,
+        question: str,
+        thread_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Collect short-term and long-term memory snippets for direct answering."""
+        config = {"configurable": {"thread_id": thread_id}}
+        checkpoint_messages = self._get_checkpoint_messages(config)
+        persisted_messages = checkpoint_messages or self._get_persisted_messages(thread_id)
+        recent_history = self._format_messages(list(persisted_messages)[-6:])
+
+        facts = self._get_session_memory_facts(thread_id, limit=5)
+        facts_text = self._format_memory_facts(facts, limit=5)
+
+        last_sql_text = ""
+        thread_state = self.session_data.get(thread_id, {})
+        if isinstance(thread_state, dict):
+            last_sql_result = thread_state.get("last_sql_result")
+            if isinstance(last_sql_result, dict):
+                parsed_data = self._parse_cached_sql_data(last_sql_result.get("data"))
+                if parsed_data is not None:
+                    last_sql_text = json.dumps(parsed_data, ensure_ascii=False)
+
+        knowledge_text = ""
+        if user_id:
+            try:
+                knowledge = self.long_term_memory.get_relevant_knowledge(user_id, question, top_k=4)
+                knowledge_lines = [
+                    f"- {item['content']}"
+                    for item in knowledge
+                    if isinstance(item, dict) and item.get("content")
+                ]
+                knowledge_text = "\n".join(knowledge_lines)
+            except Exception as e:
+                logger.warning(f"读取长期记忆失败: {e}")
+
+        return {
+            "recent_history": recent_history,
+            "facts_text": facts_text,
+            "last_sql_text": last_sql_text,
+            "knowledge_text": knowledge_text,
+        }
+
+    def _try_answer_from_memory(
+        self,
+        question: str,
+        thread_id: str,
+        user_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Answer from memory first; fall back to SQL when memory is insufficient."""
+        memory_context = self._build_memory_answer_context(question, thread_id, user_id)
+        if not any(memory_context.values()):
+            return None
+
+        prompt = f"""你是一个对话记忆助手。请只根据给定的记忆回答当前问题。
+
+如果这些记忆已经明确包含答案，就直接回答，尽量简洁准确。
+如果记忆不足、信息不确定、或者仍然需要重新查数据库确认，请只返回 NEED_FRESH_DATA。
+
+当前问题：
+{question}
+
+最近对话：
+{memory_context['recent_history'] or '无'}
+
+会话事实记忆：
+{memory_context['facts_text'] or '无'}
+
+最近一次结构化查询结果：
+{memory_context['last_sql_text'] or '无'}
+
+长期记忆：
+{memory_context['knowledge_text'] or '无'}
+
+要求：
+1. 只能依据提供的记忆回答，不能补充猜测。
+2. 如果记忆里已经有明确数值或结论，优先直接复用。
+3. 如果当前问题是在追问上一轮结果，也按已确认结论直接作答。
+4. 记忆不足时只返回 NEED_FRESH_DATA。"""
+
+        try:
+            answer = self._llm_to_str(self.llm.invoke(prompt)).strip()
+        except Exception as e:
+            logger.warning(f"记忆直答失败，回退常规流程: {e}")
+            return None
+
+        if not answer:
+            return None
+
+        if "NEED_FRESH_DATA" in answer.upper():
+            return None
+
+        return answer
     
     def _intent_node(self, state: MasterAgentState) -> MasterAgentState:
         """意图识别节点（支持6种意图）- 使用规则+LLM混合策略"""
@@ -780,9 +1734,7 @@ class MasterAgent:
             state["metadata"]["sql_result"] = result
             
             # 保存到会话数据存储
-            if thread_id not in self.session_data:
-                self.session_data[thread_id] = {}
-            self.session_data[thread_id]["last_sql_result"] = result
+            self._remember_last_sql_result(thread_id, result)
             
         except Exception as e:
             state["error"] = f"SQL查询失败: {str(e)}"
@@ -835,9 +1787,7 @@ class MasterAgent:
             state["sql_result"] = sql_result
             state["metadata"]["sql_result"] = sql_result
             
-            if thread_id not in self.session_data:
-                self.session_data[thread_id] = {}
-            self.session_data[thread_id]["last_sql_result"] = sql_result
+            self._remember_last_sql_result(thread_id, sql_result)
             
             if sql_result.get("error"):
                 state["error"] = f"SQL查询失败: {sql_result['error']}"
@@ -889,9 +1839,7 @@ class MasterAgent:
             state["sql_result"] = sql_result
             state["metadata"]["sql_result"] = sql_result
             
-            if thread_id not in self.session_data:
-                self.session_data[thread_id] = {}
-            self.session_data[thread_id]["last_sql_result"] = sql_result
+            self._remember_last_sql_result(thread_id, sql_result)
             
             # 再联网搜索 + 联合分析
             state["search_result"] = search_result
@@ -1001,13 +1949,53 @@ class MasterAgent:
         logger.info(f"Master Agent 收到问题: {question[:50]}...")
         
         # 缓存查找
+        memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
+        if memory_answer:
+            logger.info("Memory answer hit, skip SQL/analysis pipeline")
+            self._remember_conversation_turn(thread_id, question, memory_answer)
+            self._remember_answer_fact(
+                thread_id,
+                question,
+                memory_answer,
+                intent="memory_answer",
+                user_id=user_id,
+            )
+            return memory_answer
+
+        memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
+        if memory_answer:
+            logger.info("Memory answer hit, skip SQL/analysis pipeline")
+            yield sse("status", message="命中记忆，直接回答...")
+            for char in memory_answer:
+                yield sse("chunk", content=char)
+                time.sleep(0.01)
+            yield sse("done", answer=memory_answer)
+            self._remember_conversation_turn(thread_id, question, memory_answer)
+            self._remember_answer_fact(
+                thread_id,
+                question,
+                memory_answer,
+                intent="memory_answer",
+                user_id=user_id,
+            )
+            return
+
         cached_answer = self._find_cached_answer(question)
         if cached_answer:
             logger.info("命中缓存，直接返回结果")
+            self._remember_conversation_turn(thread_id, question, cached_answer)
             return cached_answer
         
+        config = {"configurable": {"thread_id": thread_id}}
+        checkpoint_messages = self._get_checkpoint_messages(config)
+        initial_messages = [HumanMessage(content=question)]
+        if not checkpoint_messages:
+            persisted_messages = self._get_persisted_messages(thread_id)
+            if persisted_messages:
+                initial_messages = persisted_messages + initial_messages
+
         initial_state = {
-            "messages": [HumanMessage(content=question)],
+            "messages": initial_messages,
             "user_question": question,
             "intent": None,
             "sql_result": None,
@@ -1031,6 +2019,7 @@ class MasterAgent:
         
         # 获取完整的对话历史（已经包含了当前的问题和回答）
         all_messages = list(final_state["messages"])
+        self._save_conversation_messages(thread_id, all_messages)
         
         logger.info(f"Master Agent 处理完成，回答长度: {len(answer)} 字符")
         logger.info(f"Master Agent 当前会话共有 {len(all_messages)} 条消息")
@@ -1040,6 +2029,15 @@ class MasterAgent:
             self._extract_and_save_memory(all_messages, user_id)
         
         # 缓存结果
+        self._remember_answer_fact(
+            thread_id,
+            question,
+            answer,
+            intent=final_state.get("intent"),
+            user_id=user_id,
+            sql_result=final_state.get("sql_result"),
+        )
+
         self._add_to_cache(
             question,
             answer,
@@ -1101,6 +2099,7 @@ class MasterAgent:
                 yield sse("chunk", content=char)
                 time.sleep(0.01)
             yield sse("done", answer=cached_answer)
+            self._remember_conversation_turn(thread_id, question, cached_answer)
             return
         
         # --- 意图识别（直接调用，以便立即推送状态）---
@@ -1122,6 +2121,8 @@ class MasterAgent:
             existing_msgs = list(snapshot.values.get("messages", []))
         except Exception:
             existing_msgs = []
+        if not existing_msgs:
+            existing_msgs = self._get_persisted_messages(thread_id)
         
         temp_state: MasterAgentState = {
             "messages": existing_msgs,
@@ -1201,9 +2202,7 @@ class MasterAgent:
                     yield sse("error", message=f"数据库查询出错: {sql_result['error']}")
                 
                 # 保存会话数据
-                if thread_id not in self.session_data:
-                    self.session_data[thread_id] = {}
-                self.session_data[thread_id]["last_sql_result"] = sql_result
+                self._remember_last_sql_result(thread_id, sql_result)
             
             # 数据分析（适用于 analysis_only / sql_and_analysis）
             if intent in ("analysis_only", "sql_and_analysis"):
@@ -1244,9 +2243,7 @@ class MasterAgent:
                     )
                 if sql_result.get("error"):
                     yield sse("error", message=f"数据库查询出错: {sql_result['error']}")
-                if thread_id not in self.session_data:
-                    self.session_data[thread_id] = {}
-                self.session_data[thread_id]["last_sql_result"] = sql_result
+                self._remember_last_sql_result(thread_id, sql_result)
                 if search_result.get("sources"):
                     yield sse("sources", sources=search_result["sources"])
                 if search_result.get("error"):
@@ -1322,6 +2319,15 @@ class MasterAgent:
         yield sse("done", answer=final_answer)
         
         # 缓存结果
+        self._remember_answer_fact(
+            thread_id,
+            question,
+            final_answer,
+            intent=intent,
+            user_id=user_id,
+            sql_result=sql_result,
+        )
+
         self._add_to_cache(
             question,
             final_answer,
@@ -1340,8 +2346,130 @@ class MasterAgent:
                 as_node="summarize"
             )
             all_msgs = existing_msgs + new_messages
+            self._save_conversation_messages(thread_id, all_msgs)
             if user_id:
                 self._extract_and_save_memory(all_msgs, user_id)
         except Exception as e:
             print(f"保存对话历史失败（不影响本次回答）: {e}")
 
+    def query(self, question: str, thread_id: str = "default", user_id: Optional[str] = None) -> str:
+        """Final query implementation with memory-first answering."""
+        logger.info(f"Master Agent query: {question[:50]}...")
+
+        memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
+        if memory_answer:
+            logger.info("Memory answer hit, skip SQL/analysis pipeline")
+            self._remember_conversation_turn(thread_id, question, memory_answer)
+            self._remember_answer_fact(
+                thread_id,
+                question,
+                memory_answer,
+                intent="memory_answer",
+                user_id=user_id,
+            )
+            return memory_answer
+
+        cached_answer = self._find_cached_answer(question)
+        if cached_answer:
+            logger.info("Cache answer hit")
+            self._remember_conversation_turn(thread_id, question, cached_answer)
+            return cached_answer
+
+        config = {"configurable": {"thread_id": thread_id}}
+        checkpoint_messages = self._get_checkpoint_messages(config)
+        initial_messages = [HumanMessage(content=question)]
+        if not checkpoint_messages:
+            persisted_messages = self._get_persisted_messages(thread_id)
+            if persisted_messages:
+                initial_messages = persisted_messages + initial_messages
+
+        initial_state = {
+            "messages": initial_messages,
+            "user_question": question,
+            "intent": None,
+            "sql_result": None,
+            "analysis_result": None,
+            "search_result": None,
+            "final_answer": None,
+            "error": None,
+            "metadata": {
+                "thread_id": thread_id,
+                "user_id": user_id,
+            },
+        }
+
+        final_state = self.graph.invoke(initial_state, config)
+        answer = final_state.get("final_answer", "未能生成有效回答")
+        all_messages = list(final_state["messages"])
+        self._save_conversation_messages(thread_id, all_messages)
+
+        if user_id:
+            self._extract_and_save_memory(all_messages, user_id)
+
+        self._remember_answer_fact(
+            thread_id,
+            question,
+            answer,
+            intent=final_state.get("intent"),
+            user_id=user_id,
+            sql_result=final_state.get("sql_result"),
+        )
+
+        self._add_to_cache(
+            question,
+            answer,
+            intent=final_state.get("intent"),
+            sql_result=final_state.get("sql_result"),
+            analysis_result=final_state.get("analysis_result"),
+            search_result=final_state.get("search_result"),
+        )
+
+        return answer
+
+    def stream_query(
+        self,
+        question: str,
+        thread_id: str = "default",
+        user_id: Optional[str] = None
+    ) -> Generator[str, None, None]:
+        """Final stream implementation with memory-first answering."""
+
+        def sse(type_: str, **kwargs) -> str:
+            return f"data: {json.dumps({'type': type_, **kwargs}, ensure_ascii=False)}\n\n"
+
+        memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
+        if memory_answer:
+            logger.info("Memory answer hit during streaming")
+            yield sse("status", message="命中记忆，直接回答...")
+            for char in memory_answer:
+                yield sse("chunk", content=char)
+                time.sleep(0.01)
+            yield sse("done", answer=memory_answer)
+            self._remember_conversation_turn(thread_id, question, memory_answer)
+            self._remember_answer_fact(
+                thread_id,
+                question,
+                memory_answer,
+                intent="memory_answer",
+                user_id=user_id,
+            )
+            return
+
+        cached_answer = self._find_cached_answer(question)
+        if cached_answer:
+            logger.info("Cache answer hit during streaming")
+            yield sse("status", message="命中缓存，直接回答...")
+            for char in cached_answer:
+                yield sse("chunk", content=char)
+                time.sleep(0.01)
+            yield sse("done", answer=cached_answer)
+            self._remember_conversation_turn(thread_id, question, cached_answer)
+            return
+
+        yield sse("status", message="正在处理问题...")
+        answer = self.query(question, thread_id=thread_id, user_id=user_id)
+        yield sse("intent", intent="memory_or_pipeline")
+        for char in answer:
+            yield sse("chunk", content=char)
+            time.sleep(0.01)
+        yield sse("done", answer=answer)

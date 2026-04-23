@@ -13,8 +13,11 @@ LangGraph智能问答Agent - 多智能体版本
 """
 
 import os
+import json
+import threading
 import uuid
 from typing import Dict, Any
+from pathlib import Path
 
 from langchain_core.language_models import BaseLLM
 import yaml
@@ -45,6 +48,9 @@ class MultiAgentSystem:
         self.config = self._load_config(config_path)
         self.llm = self._init_llm()
         self.db_path = self.config["database"]["path"]
+        self.runtime_state_path = Path("./data/user_runtime_state.json")
+        self._runtime_lock = threading.Lock()
+        self._runtime_state = self._load_runtime_state()
         
         # 记忆配置
         memory_config = self.config.get("memory", {})
@@ -68,6 +74,43 @@ class MultiAgentSystem:
         # 用户登录状态
         self.user_id = None  # 当前登录用户
         self.session_id = None  # 当前会话ID
+
+    def _load_runtime_state(self) -> Dict[str, Any]:
+        if not self.runtime_state_path.exists():
+            return {"users": {}}
+        try:
+            with self.runtime_state_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                users = data.get("users")
+                if isinstance(users, dict):
+                    return {"users": users}
+        except Exception as e:
+            console.print(f"[yellow]加载运行时状态失败，将使用空状态: {e}[/yellow]")
+        return {"users": {}}
+
+    def _save_runtime_state(self) -> None:
+        self.runtime_state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.runtime_state_path.with_suffix(self.runtime_state_path.suffix + ".tmp")
+        with self._runtime_lock:
+            with temp_path.open("w", encoding="utf-8") as f:
+                json.dump(self._runtime_state, f, ensure_ascii=False, indent=2)
+            temp_path.replace(self.runtime_state_path)
+
+    def _restore_session_id(self, user_id: str) -> str:
+        users = self._runtime_state.setdefault("users", {})
+        user_state = users.get(user_id, {})
+        session_id = user_state.get("session_id")
+        if isinstance(session_id, str) and session_id.strip():
+            return session_id
+        return str(uuid.uuid4())
+
+    def _persist_user_runtime_state(self, user_id: str) -> None:
+        users = self._runtime_state.setdefault("users", {})
+        users[user_id] = {
+            "session_id": self.session_id,
+        }
+        self._save_runtime_state()
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """加载配置文件"""
@@ -159,9 +202,12 @@ class MultiAgentSystem:
         """
         try:
             self.user_id = user_id
+            restored_session_id = self._restore_session_id(user_id)
             self.session_id = str(uuid.uuid4())  # 生成新的会话ID
             
             # 更新长期记忆中的用户活跃时间
+            self.session_id = restored_session_id
+            self._persist_user_runtime_state(user_id)
             self.master_agent.long_term_memory.update_user_activity(user_id)
             
             return True
@@ -225,6 +271,7 @@ class MultiAgentSystem:
         """开始新会话（保留当前用户）"""
         if self.user_id:
             self.session_id = str(uuid.uuid4())
+            self._persist_user_runtime_state(self.user_id)
             console.print(f"[green]已开始新会话: {self.session_id[:8]}...[/green]")
         else:
             console.print("[yellow]请先登录[/yellow]")

@@ -10,6 +10,63 @@ const AppState = {
 
 // ===== API 配置 =====
 const API_BASE_URL = window.location.origin;
+const STORAGE_KEY = 'multi-agent-exp-state-v1';
+
+function saveAppState() {
+    try {
+        const payload = {
+            userId: AppState.userId,
+            sessionId: AppState.sessionId,
+            messageHistory: AppState.messageHistory,
+            userInfo: AppState.userInfo
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch (error) {
+        console.warn('保存本地状态失败:', error);
+    }
+}
+
+function loadSavedState() {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (error) {
+        console.warn('读取本地状态失败:', error);
+        return null;
+    }
+}
+
+function clearSavedState() {
+    try {
+        localStorage.removeItem(STORAGE_KEY);
+    } catch (error) {
+        console.warn('清理本地状态失败:', error);
+    }
+}
+
+function restoreMessageHistory(history = []) {
+    if (!Array.isArray(history) || history.length === 0) return;
+
+    const chatMessages = document.getElementById('chatMessages');
+    chatMessages.innerHTML = '';
+    AppState.messageHistory = [];
+
+    history.forEach((item) => {
+        if (!item || typeof item.text !== 'string') return;
+        addMessage(item.text, Boolean(item.isUser), {
+            skipHistory: true,
+            skipPersist: true,
+            time: item.time
+        });
+        AppState.messageHistory.push({
+            text: item.text,
+            isUser: Boolean(item.isUser),
+            time: item.time || ''
+        });
+    });
+}
 
 // ===== API 调用函数 =====
 async function apiCall(endpoint, data = {}) {
@@ -30,9 +87,9 @@ async function apiCall(endpoint, data = {}) {
 }
 
 // ===== 登录相关 =====
-async function handleLogin() {
+async function handleLogin(options = {}) {
     const userIdInput = document.getElementById('userIdInput');
-    const userId = userIdInput.value.trim() || 'guest';
+    const userId = (options.userId || userIdInput.value.trim() || 'guest').trim();
     
     const loginBtn = document.getElementById('loginBtn');
     loginBtn.disabled = true;
@@ -50,6 +107,9 @@ async function handleLogin() {
             document.getElementById('mainApp').style.display = 'flex';
             
             updateUserInfo();
+            if (Array.isArray(options.restoreMessages) && options.restoreMessages.length > 0) {
+                restoreMessageHistory(options.restoreMessages);
+            }
             addSystemMessage(`欢迎回来，${userId}！我已准备好为您服务。`);
 
             if (AppState.userInfo) {
@@ -59,6 +119,7 @@ async function handleLogin() {
                     addSystemMessage(`已加载您的长期记忆：偏好 ${prefCount} 项，知识 ${knowCount} 条。`);
                 }
             }
+            saveAppState();
         }
     } catch (error) {
         alert('登录失败: ' + error.message);
@@ -82,6 +143,7 @@ function updateUserInfo() {
 
 function handleLogout() {
     if (confirm('确定要退出登录吗？')) {
+        clearSavedState();
         location.reload();
     }
 }
@@ -171,7 +233,7 @@ function addMessage(text, isUser = false, meta = {}) {
     messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
     
     const now = new Date();
-    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+    const timeStr = meta.time || `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
     
     const bubbleInner = isUser 
         ? `${escapeHtml(text)}`
@@ -201,7 +263,12 @@ function addMessage(text, isUser = false, meta = {}) {
         });
     }
     
-    AppState.messageHistory.push({ text, isUser, time: timeStr });
+    if (!meta.skipHistory) {
+        AppState.messageHistory.push({ text, isUser, time: timeStr });
+    }
+    if (!meta.skipPersist) {
+        saveAppState();
+    }
     return messageDiv;
 }
 
@@ -358,6 +425,7 @@ function createStreamingMessage() {
         finalize(fullAnswer) {
             this.hideStatus();
             AppState.messageHistory.push({ text: fullAnswer, isUser: false, time: timeStr });
+            saveAppState();
         }
     };
 }
@@ -703,6 +771,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const modal = document.getElementById('userInfoModal');
     modal.addEventListener('click', (e) => { if (e.target === modal) handleCloseModal(); });
     
+    const savedState = loadSavedState();
+    if (savedState && savedState.userId) {
+        userIdInput.value = savedState.userId;
+        handleLogin({
+            userId: savedState.userId,
+            restoreMessages: Array.isArray(savedState.messageHistory) ? savedState.messageHistory : []
+        }).catch((error) => {
+            console.warn('自动恢复登录失败:', error);
+        });
+    }
+
     userIdInput.focus();
     
     // 窗口大小变化时调整图表
