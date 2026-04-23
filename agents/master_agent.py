@@ -234,12 +234,68 @@ class MasterAgent:
         
         # 会话数据存储：保存每个thread_id的最近查询结果
         self.session_data = {}
+
         
-        # 结果缓存（问题摘要 -> 回答），避免重复查询
+        # 结果缓存（问题关键词 -> 回答列表），支持部分匹配
         self._cache = {}
         
         # 构建工作流
         self.graph = self._build_graph()
+    
+    def _get_cache_key(self, question: str) -> str:
+        """从问题中提取缓存key（关键词）"""
+        q = question.lower()
+        keywords = []
+        
+        # 部门关键词
+        depts = ["研发", "产品", "设计", "市场", "销售", "运营", "人事", "财务", "技术", "测试", "运维"]
+        for dept in depts:
+            if dept in q:
+                keywords.append(dept)
+        
+        # 操作关键词
+        actions = ["平均", "最高", "最低", "总", "排名", "统计", "查询", "对比", "分析"]
+        for action in actions:
+            if action in q:
+                keywords.append(action)
+        
+        # 薪资相关
+        if "薪资" in q or "工资" in q or "收入" in q:
+            keywords.append("薪资")
+        
+        if not keywords:
+            keywords = [q[:10]]
+        
+        return "|".join(keywords)
+    
+    def _find_cached_answer(self, question: str) -> str | None:
+        """从缓存中查找匹配的回答（仅完全匹配）"""
+        cache_key = self._get_cache_key(question)
+        
+        logger.info(f"缓存查找 - 问题: {question[:20]}, key: {cache_key}")
+        
+        # 仅完全匹配
+        if cache_key in self._cache:
+            answers = self._cache[cache_key]
+            if answers:
+                logger.info(f"完全匹配命中: {cache_key}")
+                return answers[0]
+        
+        logger.info(f"当前缓存keys: {list(self._cache.keys())}")
+        logger.info("缓存未命中")
+        return None
+    
+    def _add_to_cache(self, question: str, answer: str):
+        """将结果添加到缓存"""
+        cache_key = self._get_cache_key(question)
+        
+        if cache_key not in self._cache:
+            self._cache[cache_key] = []
+        
+        # 限制每个key最多存3个答案
+        if len(self._cache[cache_key]) < 3:
+            self._cache[cache_key].append(answer)
+            logger.info(f"结果已加入缓存: {cache_key}")
     
     def _build_graph(self) -> StateGraph:
         """构建LangGraph状态图（支持6种意图路由）"""
@@ -709,11 +765,11 @@ class MasterAgent:
         """
         logger.info(f"Master Agent 收到问题: {question[:50]}...")
         
-        # 简单缓存：基于问题前50个字符的hash
-        cache_key = hash(question[:50])
-        if cache_key in self._cache:
+        # 缓存查找
+        cached_answer = self._find_cached_answer(question)
+        if cached_answer:
             logger.info("命中缓存，直接返回结果")
-            return self._cache[cache_key]
+            return cached_answer
         
         initial_state = {
             "messages": [HumanMessage(content=question)],
@@ -748,10 +804,8 @@ class MasterAgent:
         if user_id:
             self._extract_and_save_memory(all_messages, user_id)
         
-        # 缓存结果（限制缓存大小）
-        if len(self._cache) < 100:
-            self._cache[cache_key] = answer
-            logger.info(f"结果已加入缓存: {question[:30]}...")
+        # 缓存结果
+        self._add_to_cache(question, answer)
         
         return answer
     
@@ -798,10 +852,9 @@ class MasterAgent:
             return f"data: {json.dumps({'type': type_, **kwargs}, ensure_ascii=False)}\n\n"
         
         # 缓存检查
-        cache_key = hash(question[:50])
-        if cache_key in self._cache:
+        cached_answer = self._find_cached_answer(question)
+        if cached_answer:
             logger.info("命中缓存，直接返回结果")
-            cached_answer = self._cache[cache_key]
             for char in cached_answer:
                 yield sse("chunk", content=char)
                 time.sleep(0.01)
@@ -1027,9 +1080,7 @@ class MasterAgent:
         yield sse("done", answer=final_answer)
         
         # 缓存结果
-        if len(self._cache) < 100:
-            self._cache[cache_key] = final_answer
-            logger.info(f"结果已加入缓存: {question[:30]}...")
+        self._add_to_cache(question, final_answer)
         
         # --- 保存对话历史到 LangGraph checkpointer ---
         try:
