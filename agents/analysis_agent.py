@@ -6,7 +6,7 @@
 
 import json
 import logging
-import logging.handlers
+import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, List
@@ -14,29 +14,12 @@ from pathlib import Path
 
 from langchain_core.language_models import BaseLLM
 
-log_dir = Path(__file__).parent.parent / "logs"
-log_dir.mkdir(parents=True, exist_ok=True)
+sys.path.append(str(Path(__file__).parent.parent))
+from logging_config import setup_logging
 
-file_handler = logging.handlers.RotatingFileHandler(
-    log_dir / "app.log",
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding='utf-8'
-)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        file_handler,
-        logging.StreamHandler()
-    ]
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
 from prompts import get_analysis_prompt, get_chart_config_prompt
 
 
@@ -252,7 +235,7 @@ class DataAnalysisAgent:
             return None
             
         except Exception as e:
-            print(f"[图表生成] 图表配置生成失败（不影响分析结果）: {e}")
+            logger.warning(f"[图表生成] 图表配置生成失败（不影响分析结果）: {e}")
             return None
     
     def analyze(self, data: str, context: str = "") -> Dict[str, Any]:

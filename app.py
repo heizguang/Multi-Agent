@@ -11,31 +11,14 @@ import json
 import time
 import threading
 import logging
-import logging.handlers
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
+from urllib.parse import unquote
 
-LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+from logging_config import setup_logging
 
-file_handler = logging.handlers.RotatingFileHandler(
-    LOG_DIR / "app.log",
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding='utf-8'
-)
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
-
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
-
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[console_handler, file_handler]
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # 将当前目录添加到Python路径
@@ -59,26 +42,66 @@ LOG_FILE = LOG_DIR / "conversation_logs.jsonl"
 _log_lock = threading.Lock()
 
 
-@app.before_request
-def log_request_info():
-    """请求开始时记录日志"""
-    request.start_time = time.perf_counter()
-    logger.info(f"{request.method} {request.path} - 请求开始")
+class RequestLogMiddleware:
+    """记录所有 WSGI 请求，包括静态文件和流式响应。"""
+
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        start_time = time.perf_counter()
+        method = environ.get("REQUEST_METHOD", "-")
+        raw_path = environ.get("PATH_INFO") or "/"
+        path = unquote(raw_path)
+        query = environ.get("QUERY_STRING", "")
+        display_path = f"{path}?{query}" if query else path
+        remote_addr = environ.get("HTTP_X_FORWARDED_FOR") or environ.get("REMOTE_ADDR", "-")
+        status_holder = {"status": "000"}
+        logged = {"done": False}
+
+        logger.info(f"{method} {display_path} - 请求开始 - 客户端: {remote_addr}")
+
+        def logging_start_response(status, headers, exc_info=None):
+            status_holder["status"] = status.split(" ", 1)[0]
+            return start_response(status, headers, exc_info)
+
+        def write_log(error=None):
+            if logged["done"]:
+                return
+            logged["done"] = True
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            status_code = status_holder["status"]
+            message = (
+                f"{method} {display_path} - 状态码: {status_code} - "
+                f"耗时: {duration_ms:.2f}ms - 客户端: {remote_addr}"
+            )
+            if error is not None:
+                logger.exception(f"{message} - 请求异常")
+            elif str(status_code).startswith(("4", "5")):
+                logger.warning(message)
+            else:
+                logger.info(message)
+
+        try:
+            iterable = self.wsgi_app(environ, logging_start_response)
+        except Exception as e:
+            write_log(e)
+            raise
+
+        try:
+            for chunk in iterable:
+                yield chunk
+        except Exception as e:
+            write_log(e)
+            raise
+        finally:
+            close = getattr(iterable, "close", None)
+            if close is not None:
+                close()
+            write_log()
 
 
-@app.after_request
-def log_response_info(response):
-    """请求完成后记录日志"""
-    duration = time.perf_counter() - getattr(request, 'start_time', time.perf_counter())
-    status = response.status_code
-    
-    if status >= 200 and status < 300:
-        logger.info(f"{request.method} {request.path} - {status} - {duration*1000:.2f}ms")
-    elif status >= 400:
-        logger.warning(f"{request.method} {request.path} - {status} - {duration*1000:.2f}ms")
-    else:
-        logger.info(f"{request.method} {request.path} - {status} - {duration*1000:.2f}ms")
-    return response
+app.wsgi_app = RequestLogMiddleware(app.wsgi_app)
 
 
 def _append_chat_log(record: Dict[str, Any]) -> None:
@@ -436,23 +459,23 @@ if __name__ == '__main__':
     # 检查并初始化数据库
     db_path = Path(__file__).parent / "data" / "company.db"
     if not db_path.exists():
-        print("检测到数据库文件不存在，正在初始化...")
+        logger.info("检测到数据库文件不存在，正在初始化...")
         try:
             from data.init_db import init_database
             init_database()
-            print("数据库初始化完成")
+            logger.info("数据库初始化完成")
         except Exception as e:
-            print(f"数据库初始化失败: {e}")
+            logger.exception(f"数据库初始化失败: {e}")
     else:
-        print(f"数据库已存在: {db_path}")
+        logger.info(f"数据库已存在: {db_path}")
     
     # 检查环境变量
     if not os.getenv("OPENAI_API_KEY"):
-        print("错误：未设置 OPENAI_API_KEY（可放在 .env 中）")
+        logger.error("错误：未设置 OPENAI_API_KEY（可放在 .env 中）")
         sys.exit(1)
     
-    print("多智能体数据查询系统 Web API 启动中...")
-    print("访问地址: http://localhost:5000")
+    logger.info("多智能体数据查询系统 Web API 启动中...")
+    logger.info("访问地址: http://localhost:5000")
     
     app.run(host='0.0.0.0', port=5000, debug=True)
 

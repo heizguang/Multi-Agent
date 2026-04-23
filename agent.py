@@ -25,6 +25,7 @@ import yaml
 
 from env_loader import load_env_file
 from llm_client import OpenAICompatRequestsLLM
+from logging_config import setup_logging
 
 load_env_file()
 
@@ -36,11 +37,7 @@ from rich.prompt import Prompt
 
 console = Console()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -161,7 +158,7 @@ class MultiAgentSystem:
 
             # 默认优先使用 requests 通道，避免在模块导入阶段卡在 langchain_openai/certifi。
             if not sdk_enabled:
-                print("[LLM] 使用 requests 兼容通道启动（未启用 ChatOpenAI SDK）")
+                logger.info("[LLM] 使用 requests 兼容通道启动（未启用 ChatOpenAI SDK）")
                 return OpenAICompatRequestsLLM(
                     model=model,
                     api_key=api_key,
@@ -184,10 +181,10 @@ class MultiAgentSystem:
                     max_tokens=max_tokens,
                     streaming=True,
                 )
-                print("[LLM] ChatOpenAI 通道初始化完成")
+                logger.info("[LLM] ChatOpenAI 通道初始化完成")
                 return sdk_llm
             except Exception as e:
-                print(f"[LLM] ChatOpenAI 通道不可用，切换 requests 通道: {e}")
+                logger.warning(f"[LLM] ChatOpenAI 通道不可用，切换 requests 通道: {e}")
                 return OpenAICompatRequestsLLM(
                     model=model,
                     api_key=api_key,

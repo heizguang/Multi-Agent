@@ -7,9 +7,14 @@ Milvus 向量存储模块
 
 import logging
 import os
+import sys
 from typing import List, Dict, Any, Optional, Callable
 from pathlib import Path
 
+sys.path.append(str(Path(__file__).parent.parent))
+from logging_config import setup_logging
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 try:

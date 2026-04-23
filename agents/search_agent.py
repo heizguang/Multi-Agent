@@ -11,34 +11,17 @@ import os
 import re
 import sys
 import logging
-import logging.handlers
 from pathlib import Path
 from typing import Any, Dict, List
 
 from langchain_core.language_models import BaseLLM
 
-log_dir = Path(__file__).parent.parent / "logs"
-log_dir.mkdir(parents=True, exist_ok=True)
+sys.path.append(str(Path(__file__).parent.parent))
+from logging_config import setup_logging
 
-file_handler = logging.handlers.RotatingFileHandler(
-    log_dir / "app.log",
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding='utf-8'
-)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        file_handler,
-        logging.StreamHandler()
-    ]
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
-sys.path.append(str(Path(__file__).parent.parent))
 from prompts import get_search_and_sql_prompt, get_search_synthesis_prompt
 
 
@@ -56,9 +39,9 @@ class WebSearchAgent:
         effective_key = api_key or os.getenv("TAVILY_API_KEY", "")
 
         if not effective_key or effective_key.startswith("${"):
-            print("[DeepSearch] 未配置 TAVILY_API_KEY，联网搜索功能不可用。")
-            print("[DeepSearch] 请在环境变量或 config.yaml 中补充配置。")
-            print("[DeepSearch] 申请地址：https://tavily.com")
+            logger.warning("[DeepSearch] 未配置 TAVILY_API_KEY，联网搜索功能不可用。")
+            logger.info("[DeepSearch] 请在环境变量或 config.yaml 中补充配置。")
+            logger.info("[DeepSearch] 申请地址：https://tavily.com")
             return
 
         try:
@@ -67,11 +50,11 @@ class WebSearchAgent:
 
             self.search_tool = TavilySearch(max_results=self.max_results)
             self.available = True
-            print("[DeepSearch] Tavily 搜索工具初始化成功")
+            logger.info("[DeepSearch] Tavily 搜索工具初始化成功")
         except ImportError:
-            print("[DeepSearch] 未安装 langchain-tavily，请执行 pip install langchain-tavily")
+            logger.warning("[DeepSearch] 未安装 langchain-tavily，请执行 pip install langchain-tavily")
         except Exception as e:
-            print(f"[DeepSearch] 搜索工具初始化失败: {e}")
+            logger.exception(f"[DeepSearch] 搜索工具初始化失败: {e}")
 
     def _format_search_results(self, results: List[Dict[str, Any]]) -> str:
         if not results:
@@ -144,14 +127,14 @@ class WebSearchAgent:
             return result
 
         try:
-            print(f"[DeepSearch] 正在搜索: {question}")
+            logger.info(f"[DeepSearch] 正在搜索: {question}")
             formatted_text, sources = self._invoke_search(question)
             result["formatted_text"] = formatted_text
             result["sources"] = sources
-            print(f"[DeepSearch] 搜索完成，来源 {len(sources)} 个")
+            logger.info(f"[DeepSearch] 搜索完成，来源 {len(sources)} 个")
         except Exception as e:
             result["error"] = f"联网搜索失败: {str(e)}"
-            print(f"[DeepSearch] 搜索出错: {e}")
+            logger.exception(f"[DeepSearch] 搜索出错: {e}")
 
         return result
 

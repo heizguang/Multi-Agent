@@ -9,10 +9,15 @@ import logging
 import math
 import re
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+sys.path.append(str(Path(__file__).parent.parent))
+from logging_config import setup_logging
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -191,7 +196,7 @@ class LongTermMemory:
             conn.commit()
             return True
         except Exception as e:
-            print(f"创建/更新用户失败: {e}")
+            logger.warning(f"创建/更新用户失败: {e}")
             return False
         finally:
             conn.close()
@@ -220,7 +225,7 @@ class LongTermMemory:
             conn.commit()
             return True
         except Exception as e:
-            print(f"保存偏好失败: {e}")
+            logger.warning(f"保存偏好失败: {e}")
             return False
         finally:
             conn.close()
@@ -564,7 +569,7 @@ class LongTermMemory:
             )
             conn.commit()
         except Exception as e:
-            print(f"更新知识访问热度失败: {e}")
+            logger.warning(f"更新知识访问热度失败: {e}")
         finally:
             conn.close()
 
@@ -605,7 +610,7 @@ class LongTermMemory:
             conn.commit()
             return True
         except Exception as e:
-            print(f"删除偏好失败: {e}")
+            logger.warning(f"删除偏好失败: {e}")
             return False
         finally:
             conn.close()
@@ -625,7 +630,7 @@ class LongTermMemory:
             conn.commit()
             return True
         except Exception as e:
-            print(f"删除知识失败: {e}")
+            logger.warning(f"删除知识失败: {e}")
             return False
         finally:
             conn.close()

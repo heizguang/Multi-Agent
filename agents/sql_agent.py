@@ -8,7 +8,6 @@ import asyncio
 import concurrent.futures
 import json
 import logging
-import logging.handlers
 import re
 import sqlite3
 import sys
@@ -16,32 +15,16 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import os
-log_dir = Path(__file__).parent.parent / "logs"
-log_dir.mkdir(parents=True, exist_ok=True)
+sys.path.append(str(Path(__file__).parent.parent))
+from logging_config import setup_logging
 
-file_handler = logging.handlers.RotatingFileHandler(
-    log_dir / "app.log",
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding='utf-8'
-)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        file_handler,
-        logging.StreamHandler()
-    ]
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 from langchain_core.language_models import BaseLLM
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-sys.path.append(str(Path(__file__).parent.parent))
 from prompts import get_few_shot_prompt, get_sql_correction_prompt
 
 

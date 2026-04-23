@@ -8,34 +8,19 @@
 import concurrent.futures
 import json
 import logging
-import logging.handlers
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 from typing import TypedDict, Sequence, Dict, Any, Optional, Annotated, Generator, List
 from pathlib import Path
 
-log_dir = Path(__file__).parent.parent / "logs"
-log_dir.mkdir(parents=True, exist_ok=True)
+sys.path.append(str(Path(__file__).parent.parent))
+from logging_config import setup_logging
 
-file_handler = logging.handlers.RotatingFileHandler(
-    log_dir / "app.log",
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding='utf-8'
-)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        file_handler,
-        logging.StreamHandler()
-    ]
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 from langgraph.graph import StateGraph, END, add_messages
@@ -44,8 +29,6 @@ from langchain.messages import HumanMessage, AIMessage
 from langchain_core.messages import BaseMessage
 from langchain_core.language_models import BaseLLM
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
 from prompts import get_master_intent_prompt, get_summary_prompt
 from agents.sql_agent import SQLQueryAgent
 from agents.analysis_agent import DataAnalysisAgent
@@ -1443,7 +1426,7 @@ class MasterAgent:
             summary = self._llm_to_str(self.llm.invoke(prompt)).strip()
             return f"[对话历史总结]\n{summary}"
         except Exception as e:
-            print(f"压缩对话历史失败: {e}")
+            logger.warning(f"压缩对话历史失败: {e}")
             # 如果压缩失败，返回最近的部分对话
             lines = history_text.split("\n")
             recent_lines = lines[-20:] if len(lines) > 20 else lines
@@ -1726,7 +1709,7 @@ class MasterAgent:
         intent = state.get("intent", "simple_answer")
         # 如果 web_search/search_and_sql 但搜索不可用，降级为 simple_answer
         if intent in ("web_search", "search_and_sql") and not self.search_agent.available:
-            print("[路由] 搜索智能体不可用，意图降级为 simple_answer")
+            logger.warning("[路由] 搜索智能体不可用，意图降级为 simple_answer")
             state["final_answer"] = (
                 "联网搜索功能暂未启用。请配置 TAVILY_API_KEY 环境变量后重启系统。\n"
                 "申请地址：https://tavily.com（免费账户即可）"
@@ -2176,7 +2159,7 @@ class MasterAgent:
         try:
             raw = self.llm.invoke(intent_prompt)
             intent_raw = self._llm_to_str(raw).strip().lower()
-            print(f"[意图识别] LLM 原始返回: {repr(intent_raw)}")
+            logger.info(f"[意图识别] LLM 原始返回: {repr(intent_raw)}")
             valid_intents = [
                 "simple_answer", "sql_only", "analysis_only",
                 "sql_and_analysis", "web_search", "search_and_sql"
@@ -2193,7 +2176,7 @@ class MasterAgent:
         except Exception as e:
             intent = self._rule_based_intent(question)
             err_msg = f"{type(e).__name__}: {e}"
-            print(f"[意图识别] LLM 调用失败: {err_msg}")
+            logger.warning(f"[意图识别] LLM 调用失败: {err_msg}")
             # 尝试获取更详细的错误信息（如 API 配额不足等）
             if "FreeTierOnly" in str(e) or "Quota" in str(e):
                 err_msg = "通义千问 API 免费额度已用完，请在控制台开通付费或更换模型。"
@@ -2386,7 +2369,7 @@ class MasterAgent:
             if user_id:
                 self._extract_and_save_memory(all_msgs, user_id)
         except Exception as e:
-            print(f"保存对话历史失败（不影响本次回答）: {e}")
+            logger.warning(f"保存对话历史失败（不影响本次回答）: {e}")
 
     def query(self, question: str, thread_id: str = "default", user_id: Optional[str] = None) -> str:
         """Final query implementation with memory-first answering."""

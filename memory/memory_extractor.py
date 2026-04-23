@@ -5,10 +5,19 @@
 """
 
 import json
+import logging
+import sys
+from pathlib import Path
 from typing import List, Dict, Any
 from langchain.messages import HumanMessage, AIMessage
 from langchain_core.messages import BaseMessage
 from langchain_core.language_models import BaseLLM
+
+sys.path.append(str(Path(__file__).parent.parent))
+from logging_config import setup_logging
+
+setup_logging()
+logger = logging.getLogger(__name__)
 
 
 class MemoryExtractor:
@@ -91,7 +100,7 @@ class MemoryExtractor:
             preferences = json.loads(response)
             return preferences
         except Exception as e:
-            print(f"提取偏好失败: {e}")
+            logger.warning(f"提取偏好失败: {e}")
             return {}
     
     def extract_knowledge_from_conversation(
@@ -153,7 +162,7 @@ confidence是置信度（0-1），根据对话中该知识的明确程度评估�
                 return knowledge_list
             return []
         except Exception as e:
-            print(f"提取知识失败: {e}")
+            logger.warning(f"提取知识失败: {e}")
             return []
     
     def _format_conversation(self, messages: List[BaseMessage]) -> str:
