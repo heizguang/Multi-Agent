@@ -1948,10 +1948,17 @@ class MasterAgent:
         """
         logger.info(f"Master Agent 收到问题: {question[:50]}...")
         
-        # 缓存查找
+        # # 缓存查找
+        # cached_answer = self._find_cached_answer(question)
+        # if cached_answer:
+        #     logger.info("命中缓存，直接返回结果")
+        #     self._remember_conversation_turn(thread_id, question, cached_answer)
+        #     return cached_answer
+        
+        # 记忆查找
         memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
         if memory_answer:
-            logger.info("Memory answer hit, skip SQL/analysis pipeline")
+            logger.info("命中记忆，跳过 SQL/分析流程")
             self._remember_conversation_turn(thread_id, question, memory_answer)
             self._remember_answer_fact(
                 thread_id,
@@ -1964,7 +1971,7 @@ class MasterAgent:
 
         memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
         if memory_answer:
-            logger.info("Memory answer hit, skip SQL/analysis pipeline")
+            logger.info("命中记忆，跳过 SQL/分析流程")
             yield sse("status", message="命中记忆，直接回答...")
             for char in memory_answer:
                 yield sse("chunk", content=char)
@@ -1980,11 +1987,12 @@ class MasterAgent:
             )
             return
 
-        cached_answer = self._find_cached_answer(question)
-        if cached_answer:
-            logger.info("命中缓存，直接返回结果")
-            self._remember_conversation_turn(thread_id, question, cached_answer)
-            return cached_answer
+        # # 缓存查找
+        # cached_answer = self._find_cached_answer(question)
+        # if cached_answer:
+        #     logger.info("命中缓存，直接返回结果")
+        #     self._remember_conversation_turn(thread_id, question, cached_answer)
+        #     return cached_answer
         
         config = {"configurable": {"thread_id": thread_id}}
         checkpoint_messages = self._get_checkpoint_messages(config)
@@ -2038,21 +2046,22 @@ class MasterAgent:
             sql_result=final_state.get("sql_result"),
         )
 
-        self._add_to_cache(
-            question,
-            answer,
-            intent=final_state.get("intent"),
-            sql_result=final_state.get("sql_result"),
-            analysis_result=final_state.get("analysis_result"),
-            search_result=final_state.get("search_result"),
-        )
+        # # 添加到缓存
+        # self._add_to_cache(
+        #     question,
+        #     answer,
+        #     intent=final_state.get("intent"),
+        #     sql_result=final_state.get("sql_result"),
+        #     analysis_result=final_state.get("analysis_result"),
+        #     search_result=final_state.get("search_result"),
+        # )
         
         return answer
     
     def _extract_and_save_memory(self, messages: Sequence[BaseMessage], user_id: str):
         """自动提取并保存长期记忆"""
         try:
-            if not self.memory_extractor.should_extract(messages, threshold=6):
+            if not self.memory_extractor.should_extract(messages, threshold=0):
                 return
             
             preferences = self.memory_extractor.extract_preferences_from_conversation(
@@ -2060,6 +2069,7 @@ class MasterAgent:
             )
             for key, value in preferences.items():
                 self.long_term_memory.save_preference(user_id, key, str(value))
+                logger.info(f"保存偏好: {key} = {value}")
             
             knowledge_list = self.memory_extractor.extract_knowledge_from_conversation(
                 messages, user_id
@@ -2071,8 +2081,9 @@ class MasterAgent:
                     knowledge.get("content", ""),
                     knowledge.get("confidence", 0.8)
                 )
+                logger.info(f"保存知识: {knowledge.get('category')} - {knowledge.get('content', '')[:50]}...")
         except Exception as e:
-            print(f"提取记忆失败: {e}")
+            logger.warning(f"提取记忆失败: {e}")
     
     def stream_query(
         self,
@@ -2091,16 +2102,16 @@ class MasterAgent:
         def sse(type_: str, **kwargs) -> str:
             return f"data: {json.dumps({'type': type_, **kwargs}, ensure_ascii=False)}\n\n"
         
-        # 缓存检查
-        cached_answer = self._find_cached_answer(question)
-        if cached_answer:
-            logger.info("命中缓存，直接返回结果")
-            for char in cached_answer:
-                yield sse("chunk", content=char)
-                time.sleep(0.01)
-            yield sse("done", answer=cached_answer)
-            self._remember_conversation_turn(thread_id, question, cached_answer)
-            return
+        # # 缓存检查
+        # cached_answer = self._find_cached_answer(question)
+        # if cached_answer:
+        #     logger.info("命中缓存，直接返回结果")
+        #     for char in cached_answer:
+        #         yield sse("chunk", content=char)
+        #         time.sleep(0.01)
+        #     yield sse("done", answer=cached_answer)
+        #     self._remember_conversation_turn(thread_id, question, cached_answer)
+        #     return
         
         # --- 意图识别（直接调用，以便立即推送状态）---
         yield sse("status", message="正在识别问题意图...")
@@ -2328,14 +2339,15 @@ class MasterAgent:
             sql_result=sql_result,
         )
 
-        self._add_to_cache(
-            question,
-            final_answer,
-            intent=intent,
-            sql_result=sql_result,
-            analysis_result=analysis_result,
-            search_result=search_result,
-        )
+        # # 添加到缓存
+        # self._add_to_cache(
+        #     question,
+        #     final_answer,
+        #     intent=intent,
+        #     sql_result=sql_result,
+        #     analysis_result=analysis_result,
+        #     search_result=search_result,
+        # )
         
         # --- 保存对话历史到 LangGraph checkpointer ---
         try:
@@ -2358,7 +2370,7 @@ class MasterAgent:
 
         memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
         if memory_answer:
-            logger.info("Memory answer hit, skip SQL/analysis pipeline")
+            logger.info("命中记忆，跳过 SQL/分析流程")
             self._remember_conversation_turn(thread_id, question, memory_answer)
             self._remember_answer_fact(
                 thread_id,
@@ -2369,11 +2381,19 @@ class MasterAgent:
             )
             return memory_answer
 
-        cached_answer = self._find_cached_answer(question)
-        if cached_answer:
-            logger.info("Cache answer hit")
-            self._remember_conversation_turn(thread_id, question, cached_answer)
-            return cached_answer
+        # # 缓存查找
+        # cached_answer = self._find_cached_answer(question)
+        # if cached_answer:
+        #     logger.info("命中缓存")
+        #     self._remember_conversation_turn(thread_id, question, cached_answer)
+        #     self._remember_answer_fact(
+        #         thread_id,
+        #         question,
+        #         cached_answer,
+        #         intent="cache_answer",
+        #         user_id=user_id,
+        #     )
+        #     return cached_answer
 
         config = {"configurable": {"thread_id": thread_id}}
         checkpoint_messages = self._get_checkpoint_messages(config)
@@ -2415,14 +2435,15 @@ class MasterAgent:
             sql_result=final_state.get("sql_result"),
         )
 
-        self._add_to_cache(
-            question,
-            answer,
-            intent=final_state.get("intent"),
-            sql_result=final_state.get("sql_result"),
-            analysis_result=final_state.get("analysis_result"),
-            search_result=final_state.get("search_result"),
-        )
+        # # 添加到缓存
+        # self._add_to_cache(
+        #     question,
+        #     answer,
+        #     intent=final_state.get("intent"),
+        #     sql_result=final_state.get("sql_result"),
+        #     analysis_result=final_state.get("analysis_result"),
+        #     search_result=final_state.get("search_result"),
+        # )
 
         return answer
 
@@ -2439,7 +2460,7 @@ class MasterAgent:
 
         memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
         if memory_answer:
-            logger.info("Memory answer hit during streaming")
+            logger.info("命中记忆（流式），跳过 SQL/分析流程")
             yield sse("status", message="命中记忆，直接回答...")
             for char in memory_answer:
                 yield sse("chunk", content=char)
@@ -2455,16 +2476,17 @@ class MasterAgent:
             )
             return
 
-        cached_answer = self._find_cached_answer(question)
-        if cached_answer:
-            logger.info("Cache answer hit during streaming")
-            yield sse("status", message="命中缓存，直接回答...")
-            for char in cached_answer:
-                yield sse("chunk", content=char)
-                time.sleep(0.01)
-            yield sse("done", answer=cached_answer)
-            self._remember_conversation_turn(thread_id, question, cached_answer)
-            return
+        # # 缓存查找
+        # cached_answer = self._find_cached_answer(question)
+        # if cached_answer:
+        #     logger.info("命中缓存（流式）")
+        #     yield sse("status", message="命中缓存，直接回答...")
+        #     for char in cached_answer:
+        #         yield sse("chunk", content=char)
+        #         time.sleep(0.01)
+        #     yield sse("done", answer=cached_answer)
+        #     self._remember_conversation_turn(thread_id, question, cached_answer)
+        #     return
 
         yield sse("status", message="正在处理问题...")
         answer = self.query(question, thread_id=thread_id, user_id=user_id)
@@ -2473,3 +2495,356 @@ class MasterAgent:
             yield sse("chunk", content=char)
             time.sleep(0.01)
         yield sse("done", answer=answer)
+
+    def query(self, question: str, thread_id: str = "default", user_id: Optional[str] = None) -> str:
+        """Final query implementation with memory-first answering."""
+        logger.info(f"Master Agent query: {question[:50]}...")
+
+        memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
+        if memory_answer:
+            logger.info("命中记忆，跳过 SQL/分析流程")
+            self._remember_conversation_turn(thread_id, question, memory_answer)
+            self._remember_answer_fact(
+                thread_id,
+                question,
+                memory_answer,
+                intent="memory_answer",
+                user_id=user_id,
+            )
+            return memory_answer
+
+        # # 缓存查找
+        # cached_answer = self._find_cached_answer(question)
+        # if cached_answer:
+        #     logger.info("命中缓存")
+        #     self._remember_conversation_turn(thread_id, question, cached_answer)
+        #     self._remember_answer_fact(
+        #         thread_id,
+        #         question,
+        #         cached_answer,
+        #         intent="cache_answer",
+        #         user_id=user_id,
+        #     )
+        #     return cached_answer
+
+        config = {"configurable": {"thread_id": thread_id}}
+        checkpoint_messages = self._get_checkpoint_messages(config)
+        initial_messages = [HumanMessage(content=question)]
+        if not checkpoint_messages:
+            persisted_messages = self._get_persisted_messages(thread_id)
+            if persisted_messages:
+                initial_messages = persisted_messages + initial_messages
+
+        initial_state = {
+            "messages": initial_messages,
+            "user_question": question,
+            "intent": None,
+            "sql_result": None,
+            "analysis_result": None,
+            "search_result": None,
+            "final_answer": None,
+            "error": None,
+            "metadata": {
+                "thread_id": thread_id,
+                "user_id": user_id,
+            },
+        }
+
+        final_state = self.graph.invoke(initial_state, config)
+        answer = final_state.get("final_answer", "未能生成有效回答")
+        all_messages = list(final_state["messages"])
+        self._save_conversation_messages(thread_id, all_messages)
+
+        if user_id:
+            self._extract_and_save_memory(all_messages, user_id)
+
+        self._remember_answer_fact(
+            thread_id,
+            question,
+            answer,
+            intent=final_state.get("intent"),
+            user_id=user_id,
+            sql_result=final_state.get("sql_result"),
+        )
+
+        # # 添加到缓存
+        # self._add_to_cache(
+        #     question,
+        #     answer,
+        #     intent=final_state.get("intent"),
+        #     sql_result=final_state.get("sql_result"),
+        #     analysis_result=final_state.get("analysis_result"),
+        #     search_result=final_state.get("search_result"),
+        # )
+
+        return answer
+
+    def stream_query(
+        self,
+        question: str,
+        thread_id: str = "default",
+        user_id: Optional[str] = None
+    ) -> Generator[str, None, None]:
+        """Final stream implementation with memory-first answering."""
+
+        def sse(type_: str, **kwargs) -> str:
+            return f"data: {json.dumps({'type': type_, **kwargs}, ensure_ascii=False)}\n\n"
+
+        memory_answer = self._try_answer_from_memory(question, thread_id, user_id)
+        if memory_answer:
+            logger.info("命中记忆（流式），跳过 SQL/分析流程")
+            yield sse("status", message="命中记忆，直接回答...")
+            for char in memory_answer:
+                yield sse("chunk", content=char)
+                time.sleep(0.01)
+            yield sse("done", answer=memory_answer)
+            self._remember_conversation_turn(thread_id, question, memory_answer)
+            self._remember_answer_fact(
+                thread_id,
+                question,
+                memory_answer,
+                intent="memory_answer",
+                user_id=user_id,
+            )
+            return
+
+        # # 缓存查找
+        # cached_answer = self._find_cached_answer(question)
+        # if cached_answer:
+        #     logger.info("命中缓存（流式）")
+        #     yield sse("status", message="命中缓存，直接回答...")
+        #     for char in cached_answer:
+        #         yield sse("chunk", content=char)
+        #         time.sleep(0.01)
+        #     yield sse("done", answer=cached_answer)
+        #     self._remember_conversation_turn(thread_id, question, cached_answer)
+        #     self._remember_answer_fact(
+        #         thread_id,
+        #         question,
+        #         cached_answer,
+        #         intent="cache_answer",
+        #         user_id=user_id,
+        #     )
+        #     return
+
+        yield sse("status", message="正在识别问题意图...")
+
+        user_context = ""
+        if user_id:
+            try:
+                knowledge = self.long_term_memory.get_relevant_knowledge(user_id, question, top_k=3)
+                preferences = self.long_term_memory.get_all_preferences(user_id)
+                user_context = self._format_long_term_context(knowledge, preferences)
+            except Exception as e:
+                logger.warning(f"Load long-term context failed: {e}")
+
+        config = {"configurable": {"thread_id": thread_id}}
+        existing_msgs = self._get_checkpoint_messages(config)
+        if not existing_msgs:
+            existing_msgs = self._get_persisted_messages(thread_id)
+
+        temp_state: MasterAgentState = {
+            "messages": existing_msgs,
+            "user_question": question,
+            "intent": None,
+            "sql_result": None,
+            "analysis_result": None,
+            "search_result": None,
+            "final_answer": None,
+            "error": None,
+            "metadata": {"thread_id": thread_id, "user_id": user_id},
+        }
+        conversation_history = self._get_conversation_history(temp_state)
+
+        intent_prompt = get_master_intent_prompt(question, conversation_history, user_context)
+        try:
+            raw = self.llm.invoke(intent_prompt)
+            intent_raw = self._llm_to_str(raw).strip().lower()
+            valid_intents = [
+                "simple_answer",
+                "sql_only",
+                "analysis_only",
+                "sql_and_analysis",
+                "web_search",
+                "search_and_sql",
+            ]
+            intent = "sql_only"
+            for valid_intent in valid_intents:
+                if valid_intent in intent_raw:
+                    intent = valid_intent
+                    break
+            if intent == "simple_answer":
+                rule_intent = self._rule_based_intent(question)
+                if rule_intent != "simple_answer":
+                    intent = rule_intent
+        except Exception as e:
+            intent = self._rule_based_intent(question)
+            yield sse("error", message=f"意图识别失败，已回退规则路由: {type(e).__name__}: {e}")
+
+        yield sse("intent", intent=intent)
+
+        if intent in ("web_search", "search_and_sql") and not self.search_agent.available:
+            final_answer = "联网搜索功能暂未启用，请先配置 TAVILY_API_KEY。"
+            yield sse("chunk", content=final_answer)
+            yield sse("done", answer=final_answer)
+            self._remember_conversation_turn(thread_id, question, final_answer)
+            return
+
+        sql_result = None
+        analysis_result = None
+        search_result = None
+        final_answer = ""
+
+        if intent == "simple_answer":
+            yield sse("status", message="正在生成回答...")
+            final_answer = self._simple_answer_text(question)
+            yield sse("chunk", content=final_answer)
+        else:
+            if intent in ("sql_only", "sql_and_analysis"):
+                yield sse("status", message="正在查询数据库...")
+                sql_result = self.sql_agent.query(question)
+                if sql_result.get("sql"):
+                    yield sse(
+                        "sql",
+                        sql=sql_result["sql"],
+                        retry_count=sql_result.get("retry_count", 0),
+                    )
+                if sql_result.get("error"):
+                    yield sse("error", message=f"数据库查询出错: {sql_result['error']}")
+                self._remember_last_sql_result(thread_id, sql_result)
+
+            if intent in ("analysis_only", "sql_and_analysis"):
+                yield sse("status", message="正在分析数据...")
+                data_to_analyze = None
+                if sql_result and sql_result.get("data"):
+                    data_to_analyze = sql_result["data"]
+                elif thread_id in self.session_data:
+                    last_result = self.session_data[thread_id].get("last_sql_result", {})
+                    if isinstance(last_result, dict):
+                        data_to_analyze = last_result.get("data")
+
+                if data_to_analyze:
+                    analysis_result = self.analysis_agent.analyze(data_to_analyze, question)
+                    if analysis_result.get("chart"):
+                        yield sse("chart", config=analysis_result["chart"])
+                    if analysis_result.get("error"):
+                        yield sse("error", message=f"数据分析出错: {analysis_result['error']}")
+                else:
+                    yield sse("error", message="没有可分析的数据，请先执行相关查询。")
+
+            if intent == "web_search":
+                yield sse("status", message="正在联网搜索...")
+                search_result = self.search_agent.search(question)
+                if search_result.get("sources"):
+                    yield sse("sources", sources=search_result["sources"])
+                if search_result.get("error"):
+                    yield sse("error", message=search_result["error"])
+
+            if intent == "search_and_sql":
+                yield sse("status", message="正在执行搜索与数据库联合分析...")
+                sql_result, search_result = self._run_search_and_sql_parallel(question)
+                if sql_result.get("sql"):
+                    yield sse(
+                        "sql",
+                        sql=sql_result["sql"],
+                        retry_count=sql_result.get("retry_count", 0),
+                    )
+                if sql_result.get("error"):
+                    yield sse("error", message=f"数据库查询出错: {sql_result['error']}")
+                self._remember_last_sql_result(thread_id, sql_result)
+                if search_result.get("sources"):
+                    yield sse("sources", sources=search_result["sources"])
+                if search_result.get("error"):
+                    yield sse("error", message=search_result["error"])
+
+            yield sse("status", message="正在生成回答...")
+
+            if intent in ("web_search", "search_and_sql") and search_result:
+                if search_result.get("error"):
+                    final_answer = f"搜索出错：{search_result['error']}"
+                else:
+                    final_answer = search_result.get("answer", "未能获取搜索结果")
+                    sources = search_result.get("sources", [])
+                    if sources:
+                        final_answer += "\n\n参考来源：\n" + "\n".join(f"- {url}" for url in sources[:5])
+                yield sse("chunk", content=final_answer)
+            elif sql_result and sql_result.get("error"):
+                final_answer = f"数据库查询出错：{sql_result['error']}"
+                yield sse("chunk", content=final_answer)
+            else:
+                sql_data = sql_result.get("data") if sql_result else None
+                analysis_data = analysis_result.get("analysis") if analysis_result else None
+                summary_prompt = get_summary_prompt(
+                    question=question,
+                    sql_result=sql_data,
+                    analysis_result=analysis_data,
+                )
+
+                try:
+                    think_buffer = ""
+                    in_think = False
+                    for chunk in self.llm.stream(summary_prompt):
+                        if isinstance(chunk, str):
+                            chunk_text = chunk
+                        elif hasattr(chunk, "content"):
+                            chunk_text = str(chunk.content)
+                        elif hasattr(chunk, "text"):
+                            chunk_text = str(chunk.text)
+                        else:
+                            chunk_text = str(chunk)
+
+                        think_buffer += chunk_text
+                        if "<think>" in think_buffer and not in_think:
+                            in_think = True
+                        if in_think:
+                            if "</think>" in think_buffer:
+                                cleaned = re.sub(r"<think>[\s\S]*?</think>", "", think_buffer).strip()
+                                if cleaned:
+                                    final_answer += cleaned
+                                    yield sse("chunk", content=cleaned)
+                                think_buffer = ""
+                                in_think = False
+                            continue
+
+                        think_buffer = ""
+                        final_answer += chunk_text
+                        yield sse("chunk", content=chunk_text)
+                except Exception as e:
+                    logger.warning(f"Stream summary failed, fallback summary used: {e}")
+                    final_answer = self._fallback_summary(question, sql_data, analysis_data)
+                    yield sse("chunk", content=final_answer)
+
+        yield sse("done", answer=final_answer)
+
+        self._remember_answer_fact(
+            thread_id,
+            question,
+            final_answer,
+            intent=intent,
+            user_id=user_id,
+            sql_result=sql_result,
+        )
+
+        # # 添加到缓存
+        # self._add_to_cache(
+        #     question,
+        #     final_answer,
+        #     intent=intent,
+        #     sql_result=sql_result,
+        #     analysis_result=analysis_result,
+        #     search_result=search_result,
+        # )
+
+        try:
+            new_messages = [HumanMessage(content=question), AIMessage(content=final_answer)]
+            self.graph.update_state(
+                config,
+                {"messages": new_messages},
+                as_node="summarize",
+            )
+            all_msgs = existing_msgs + new_messages
+            self._save_conversation_messages(thread_id, all_msgs)
+            if user_id:
+                self._extract_and_save_memory(all_msgs, user_id)
+        except Exception as e:
+            logger.warning(f"Save stream conversation failed: {e}")

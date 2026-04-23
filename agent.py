@@ -14,6 +14,7 @@ LangGraph智能问答Agent - 多智能体版本
 
 import os
 import json
+import logging
 import threading
 import uuid
 from typing import Dict, Any
@@ -34,6 +35,13 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 console = Console()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
 class MultiAgentSystem:
@@ -86,7 +94,7 @@ class MultiAgentSystem:
                 if isinstance(users, dict):
                     return {"users": users}
         except Exception as e:
-            console.print(f"[yellow]加载运行时状态失败，将使用空状态: {e}[/yellow]")
+            logger.info(f"加载运行时状态失败，将使用空状态: {e}")
         return {"users": {}}
 
     def _save_runtime_state(self) -> None:
@@ -212,7 +220,7 @@ class MultiAgentSystem:
             
             return True
         except Exception as e:
-            console.print(f"[red]登录失败: {e}[/red]")
+            logger.error(f"登录失败: {e}")
             return False
     
     def query(self, question: str) -> str:
@@ -265,16 +273,16 @@ class MultiAgentSystem:
             thread_id: 线程ID
         """
         # 已废弃，现在使用 user_id + session_id 自动生成
-        console.print("[yellow]提示：thread_id现在由user_id和session_id自动生成[/yellow]")
+        logger.info("提示：thread_id现在由user_id和session_id自动生成")
     
     def new_session(self):
         """开始新会话（保留当前用户）"""
         if self.user_id:
             self.session_id = str(uuid.uuid4())
             self._persist_user_runtime_state(self.user_id)
-            console.print(f"[green]已开始新会话: {self.session_id[:8]}...[/green]")
+            logger.info(f"已开始新会话: {self.session_id[:8]}...")
         else:
-            console.print("[yellow]请先登录[/yellow]")
+            logger.info("请先登录")
     
     def get_user_info(self) -> Dict[str, Any]:
         """获取当前用户信息"""
@@ -348,44 +356,38 @@ class MultiAgentSystem:
 SQLAgent = MultiAgentSystem
 
 def main():
-    console.print(Panel.fit(
-        "[cyan]LangGraph 多智能体数据查询系统 v2.1[/cyan]\n"
-        "主智能体 + SQL查询 + 数据分析 + Web前端\n"
-        "智能路由 · 深度分析 · 长短期记忆",
-        border_style="cyan"
-    ))
+    logger.info("LangGraph 多智能体数据查询系统 v2.1 启动")
     console.print()
     
     if not os.getenv("OPENAI_API_KEY"):
-        console.print("[red]错误：未设置 OPENAI_API_KEY（可放在 .env 中）[/red]")
+        logger.error("未设置 OPENAI_API_KEY（可放在 .env 中）")
         return
     
     # 初始化系统
     agent = MultiAgentSystem()
     
     # 用户登录
-    console.print("[bold cyan]欢迎使用智能数据查询系统！[/bold cyan]")
+    logger.info("欢迎使用智能数据查询系统！")
     user_id = Prompt.ask("[cyan]请输入用户ID（用于保存您的偏好和记忆）[/cyan]", default="guest")
     
     if agent.login(user_id):
-        console.print(f"[green]欢迎 {user_id}！系统已就绪[/green]")
-        console.print(f"[dim]会话ID: {agent.session_id[:8]}...[/dim]\n")
+        logger.info(f"用户 {user_id} 登录成功，会话ID: {agent.session_id[:8]}...")
     else:
-        console.print("[red]登录失败，程序退出[/red]")
+        logger.error("登录失败，程序退出")
         return
     
     # 显示帮助信息
-    console.print("[dim]特殊命令：")
-    console.print("[dim]  - 输入 'new' 开始新会话（清空短期记忆）")
-    console.print("[dim]  - 输入 'info' 查看用户信息")
-    console.print("[dim]  - 输入 'exit' 或 'quit' 退出系统[/dim]\n")
+    logger.info("特殊命令：")
+    logger.info("  - 输入 'new' 开始新会话（清空短期记忆）")
+    logger.info("  - 输入 'info' 查看用户信息")
+    logger.info("  - 输入 'exit' 或 'quit' 退出系统")
     
     while True:
         question = Prompt.ask("[cyan]请输入问题[/cyan]")
         
         # 处理特殊命令
         if question.lower() in ['exit', 'quit', 'q']:
-            console.print("\n[yellow]再见！您的偏好和记忆已保存。[/yellow]")
+            logger.info("再见！您的偏好和记忆已保存。")
             break
         
         if question.lower() == 'new':
@@ -394,6 +396,7 @@ def main():
         
         if question.lower() == 'info':
             user_info = agent.get_user_info()
+            logger.info(f"用户信息: {user_info}")
             console.print(Panel(
                 f"[cyan]用户信息[/cyan]\n"
                 f"用户ID: {user_info.get('user_id')}\n"
@@ -408,6 +411,7 @@ def main():
         
         # 执行查询
         answer = agent.query(question)
+        logger.info(f"回答: {answer[:100]}...")
         console.print(Panel(answer, title="回答", border_style="green"))
         console.print()
 
