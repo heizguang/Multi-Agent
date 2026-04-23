@@ -16,8 +16,7 @@ import os
 import uuid
 from typing import Dict, Any
 
-from langchain_openai import ChatOpenAI
-from langchain_core.language_models import BaseLLM, BaseChatModel
+from langchain_core.language_models import BaseLLM
 import yaml
 
 from env_loader import load_env_file
@@ -85,7 +84,7 @@ class MultiAgentSystem:
         
         return replace_env_vars(config)
     
-    def _init_llm(self) -> BaseChatModel:
+    def _init_llm(self):
         """初始化语言模型
         
         使用 OpenAI 兼容接口连接 DashScope，支持所有通义千问模型
@@ -105,9 +104,26 @@ class MultiAgentSystem:
             api_key = llm_config["api_key"]
             temperature = llm_config["temperature"]
             max_tokens = llm_config["max_tokens"]
+            sdk_enabled = str(
+                llm_config.get("sdk_enabled", os.getenv("OPENAI_SDK_ENABLED", "false"))
+            ).lower() in {"1", "true", "yes", "on"}
 
-            # 初始化阶段不主动探活，避免登录时被模型网络波动阻塞。
+            # 默认优先使用 requests 通道，避免在模块导入阶段卡在 langchain_openai/certifi。
+            if not sdk_enabled:
+                print("[LLM] 使用 requests 兼容通道启动（未启用 ChatOpenAI SDK）")
+                return OpenAICompatRequestsLLM(
+                    model=model,
+                    api_key=api_key,
+                    base_url=base_url,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=60,
+                )
+
+            # 只有显式开启时才尝试导入 SDK，避免启动阶段因证书或环境问题卡死。
             try:
+                from langchain_openai import ChatOpenAI
+
                 sdk_llm = ChatOpenAI(
                     model=model,
                     api_key=api_key,
