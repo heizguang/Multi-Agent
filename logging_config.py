@@ -35,6 +35,7 @@ class StripAnsiFilter(logging.Filter):
 def setup_logging() -> logging.Logger:
     """配置根日志，返回项目根 logger。重复调用不会重复添加 handler。"""
 
+    import sys
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     root_logger = logging.getLogger()
     if getattr(root_logger, "_multi_agent_logging_configured", False):
@@ -50,7 +51,7 @@ def setup_logging() -> logging.Logger:
     file_handler.setFormatter(LOG_FORMATTER)
     file_handler.addFilter(StripAnsiFilter())
 
-    console_handler = logging.StreamHandler()
+    console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(LOG_FORMATTER)
     console_handler.addFilter(StripAnsiFilter())
