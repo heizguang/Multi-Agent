@@ -61,9 +61,10 @@ def setup_logging() -> logging.Logger:
     root_logger.addHandler(file_handler)
     root_logger._multi_agent_logging_configured = True
 
-    werkzeug_logger = logging.getLogger("werkzeug")
-    werkzeug_logger.setLevel(logging.INFO)
-    werkzeug_logger.handlers.clear()
-    werkzeug_logger.propagate = True
+    for name in ['werkzeug', 'agents', 'memory', 'sql_agent', 'analysis_agent', 'master_agent', 'long_term_memory', 'vector_store']:
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.INFO)
+        logger.handlers.clear()
+        logger.propagate = True
 
     return logging.getLogger("multi_agent")
