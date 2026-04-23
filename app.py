@@ -456,18 +456,76 @@ def health():
 
 
 if __name__ == '__main__':
-    # 检查并初始化数据库
-    db_path = Path(__file__).parent / "data" / "company.db"
-    if not db_path.exists():
-        logger.info("检测到数据库文件不存在，正在初始化...")
+    import subprocess
+    import socket
+
+    def check_port_in_use(port):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(('localhost', port)) == 0
+
+    def check_milvus_running():
+        return check_port_in_use(19530)
+
+    def start_milvus_server():
+        milvus_data_dir = Path(os.getenv("MILVUS_DATA_DIR", Path(__file__).parent / "milvus_data"))
+        milvus_data_dir.mkdir(parents=True, exist_ok=True)
+        
+        if check_milvus_running():
+            logger.info("Milvus 服务已在运行")
+            return True
+        
+        logger.info("正在启动 Milvus 服务...")
         try:
-            from data.init_db import init_database
-            init_database()
-            logger.info("数据库初始化完成")
+            import shutil
+            milvus_cmd = shutil.which("milvus-server")
+            if not milvus_cmd:
+                milvus_cmd = "milvus-server"
+            
+            logger.info(f"使用命令: {milvus_cmd}")
+            
+            proc = subprocess.Popen(
+                [milvus_cmd, "--data", str(milvus_data_dir)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            import time
+            for i in range(30):
+                if check_milvus_running():
+                    logger.info("Milvus 服务启动成功")
+                    return True
+                time.sleep(1)
+                if i % 5 == 0:
+                    logger.info(f"等待 Milvus 启动... ({i+1}s)")
+            
+            logger.warning("Milvus 服务启动超时")
+            return False
         except Exception as e:
-            logger.exception(f"数据库初始化失败: {e}")
-    else:
-        logger.info(f"数据库已存在: {db_path}")
+            logger.warning(f"启动 Milvus 服务失败: {e}")
+            return False
+
+    def init_db_and_check():
+        db_path = Path(__file__).parent / "data" / "company.db"
+        if not db_path.exists():
+            logger.info("检测到数据库文件不存在，正在初始化...")
+            try:
+                from data.init_db import init_database
+                init_database()
+                logger.info("数据库初始化完成")
+            except Exception as e:
+                logger.exception(f"数据库初始化失败: {e}")
+        else:
+            logger.info(f"数据库已存在: {db_path}")
+        
+        milvus_enabled = os.getenv("MILVUS_ENABLED", "false").lower() == "true"
+        if milvus_enabled:
+            if check_milvus_running():
+                logger.info("Milvus 服务已在运行")
+            else:
+                logger.warning("Milvus 服务未运行，向量检索功能将不可用")
+                logger.warning("如需启用向量检索，请先在另一个终端运行: milvus-server --data milvus_data")
+
+    init_db_and_check()
     
     # 检查环境变量
     if not os.getenv("OPENAI_API_KEY"):
