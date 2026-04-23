@@ -301,7 +301,7 @@ class MultiAgentSystem:
         }
     
     def switch_model(self, model: str = None, base_url: str = None, api_key: str = None) -> Dict[str, Any]:
-        """动态切换模型配置
+        """动态切换模型配置jiageceshi
         
         Args:
             model: 新模型名称（如 gpt-4、qwen-max 等）
