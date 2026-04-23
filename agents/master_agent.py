@@ -9,8 +9,9 @@ import concurrent.futures
 import json
 import logging
 import logging.handlers
+import re
 import time
-from typing import TypedDict, Sequence, Dict, Any, Optional, Annotated, Generator
+from typing import TypedDict, Sequence, Dict, Any, Optional, Annotated, Generator, List
 from pathlib import Path
 
 log_dir = Path(__file__).parent.parent / "logs"
@@ -236,66 +237,300 @@ class MasterAgent:
         self.session_data = {}
 
         
-        # 结果缓存（问题关键词 -> 回答列表），支持部分匹配
+        # 结果缓存（问题关键词 -> 结构化缓存项列表）
         self._cache = {}
         
         # 构建工作流
         self.graph = self._build_graph()
     
-    def _get_cache_key(self, question: str) -> str:
-        """从问题中提取缓存key（关键词）"""
+    def _extract_departments(self, text: str) -> List[str]:
+        """提取问题中的部门，并统一规范到“XX部”格式。"""
+        dept_aliases = {
+            "研发": "研发部",
+            "产品": "产品部",
+            "设计": "设计部",
+            "市场": "市场部",
+            "销售": "销售部",
+            "运营": "运营部",
+            "人事": "人事部",
+            "财务": "财务部",
+            "技术": "技术部",
+            "测试": "测试部",
+            "运维": "运维部",
+        }
+
+        found: List[str] = []
+
+        for match in re.findall(r"([\u4e00-\u9fff]{1,8}部)", text):
+            dept_name = match.strip()
+            if dept_name not in found:
+                found.append(dept_name)
+
+        for alias, canonical in dept_aliases.items():
+            if alias in text and canonical not in found:
+                found.append(canonical)
+
+        return found
+
+    def _build_cache_metadata(self, question: str) -> Dict[str, Any]:
+        """构建缓存匹配所需的关键词和结构化元数据。"""
         q = question.lower()
-        keywords = []
-        
-        # 部门关键词
-        depts = ["研发", "产品", "设计", "市场", "销售", "运营", "人事", "财务", "技术", "测试", "运维"]
-        for dept in depts:
-            if dept in q:
-                keywords.append(dept)
-        
-        # 操作关键词
+        departments = self._extract_departments(question)
+        department_tokens = [
+            dept[:-1] if dept.endswith("部") else dept for dept in departments
+        ]
+
+        keywords = list(department_tokens)
+        matched_actions: List[str] = []
+
         actions = ["平均", "最高", "最低", "总", "排名", "统计", "查询", "对比", "分析"]
         for action in actions:
             if action in q:
                 keywords.append(action)
-        
-        # 薪资相关
-        if "薪资" in q or "工资" in q or "收入" in q:
+                matched_actions.append(action)
+
+        salary_related = "薪资" in q or "工资" in q or "收入" in q
+        if salary_related:
             keywords.append("薪资")
-        
+
         if not keywords:
             keywords = [q[:10]]
-        
-        return "|".join(keywords)
-    
+
+        return {
+            "cache_key": "|".join(keywords),
+            "departments": departments,
+            "department_tokens": department_tokens,
+            "actions": matched_actions,
+            "salary_related": salary_related,
+        }
+
+    def _get_cache_key(self, question: str) -> str:
+        """从问题中提取缓存key（关键词）"""
+        return self._build_cache_metadata(question)["cache_key"]
+
+    def _normalize_department_value(self, value: Any) -> str:
+        """将数据中的部门值归一化为“XX部”格式。"""
+        if not isinstance(value, str):
+            return ""
+
+        normalized = value.strip()
+        if normalized.endswith("部门"):
+            normalized = normalized[:-2] + "部"
+
+        alias_map = {
+            "研发": "研发部",
+            "产品": "产品部",
+            "设计": "设计部",
+            "市场": "市场部",
+            "销售": "销售部",
+            "运营": "运营部",
+            "人事": "人事部",
+            "财务": "财务部",
+            "技术": "技术部",
+            "测试": "测试部",
+            "运维": "运维部",
+        }
+
+        if normalized in alias_map:
+            return alias_map[normalized]
+        return normalized
+
+    def _parse_cached_sql_data(self, sql_data: Any) -> Any:
+        """解析缓存中的 SQL 原始结果。"""
+        if not sql_data:
+            return None
+        if isinstance(sql_data, str):
+            try:
+                return json.loads(sql_data)
+            except Exception:
+                return None
+        return sql_data
+
+    def _filter_cached_sql_data(
+        self, sql_data: Any, requested_departments: List[str]
+    ) -> Optional[Any]:
+        """按当前问题中的部门，从缓存的 SQL 结果里筛出真正需要的数据。"""
+        parsed = self._parse_cached_sql_data(sql_data)
+        if parsed is None:
+            return None
+
+        if not requested_departments:
+            return parsed
+
+        requested_set = set(requested_departments)
+        requested_roots = {
+            dept[:-1] if dept.endswith("部") else dept for dept in requested_departments
+        }
+
+        if isinstance(parsed, dict) and isinstance(parsed.get("rows"), list):
+            filtered_rows = self._filter_cached_sql_data(parsed["rows"], requested_departments)
+            if filtered_rows is None:
+                return None
+            filtered_payload = dict(parsed)
+            filtered_payload["rows"] = filtered_rows
+            return filtered_payload
+
+        if not isinstance(parsed, list):
+            return None
+
+        filtered_rows = []
+        matched_any_department = False
+
+        for row in parsed:
+            if not isinstance(row, dict):
+                continue
+
+            row_match = False
+            for key, value in row.items():
+                normalized_value = self._normalize_department_value(value)
+                if not normalized_value:
+                    continue
+
+                key_text = str(key).lower()
+                root_value = (
+                    normalized_value[:-1]
+                    if normalized_value.endswith("部")
+                    else normalized_value
+                )
+
+                if "dept" in key_text or "department" in key_text or "部门" in str(key):
+                    matched_any_department = True
+                    if normalized_value in requested_set or root_value in requested_roots:
+                        row_match = True
+                        break
+
+            if not row_match:
+                for value in row.values():
+                    normalized_value = self._normalize_department_value(value)
+                    if not normalized_value:
+                        continue
+
+                    root_value = (
+                        normalized_value[:-1]
+                        if normalized_value.endswith("部")
+                        else normalized_value
+                    )
+                    if normalized_value in requested_set or root_value in requested_roots:
+                        row_match = True
+                        break
+
+            if row_match:
+                filtered_rows.append(row)
+
+        if matched_any_department and filtered_rows:
+            return filtered_rows
+
+        return None
+
+    def _rebuild_cached_answer(self, question: str, cache_entry: Dict[str, Any]) -> Optional[str]:
+        """对可复用的结构化缓存重新生成回答，避免把未命中的部门一并返回。"""
+        requested_departments = self._extract_departments(question)
+        sql_result = cache_entry.get("sql_result") or {}
+        filtered_sql_data = self._filter_cached_sql_data(
+            sql_result.get("data"),
+            requested_departments,
+        )
+        if filtered_sql_data is None:
+            return None
+
+        serialized_sql = json.dumps(filtered_sql_data, ensure_ascii=False)
+        summary_prompt = get_summary_prompt(
+            question=question,
+            sql_result=serialized_sql,
+            analysis_result=None,
+        )
+
+        try:
+            answer = self._llm_to_str(self.llm.invoke(summary_prompt)).strip()
+            if answer:
+                return answer
+        except Exception as e:
+            logger.warning(f"缓存命中后二次生成回答失败，使用兜底总结: {e}")
+
+        return self._fallback_summary(question, serialized_sql, None)
+
     def _find_cached_answer(self, question: str) -> str | None:
-        """从缓存中查找匹配的回答（仅完全匹配）"""
-        cache_key = self._get_cache_key(question)
-        
+        """从缓存中查找可安全复用的回答。"""
+        metadata = self._build_cache_metadata(question)
+        cache_key = metadata["cache_key"]
+
         logger.info(f"缓存查找 - 问题: {question[:20]}, key: {cache_key}")
-        
-        # 仅完全匹配
+
+        # 1. 同问题或同 key，优先直接命中
         if cache_key in self._cache:
-            answers = self._cache[cache_key]
-            if answers:
-                logger.info(f"完全匹配命中: {cache_key}")
-                return answers[0]
-        
+            entries = self._cache[cache_key]
+            for entry in entries:
+                if entry.get("question") == question and entry.get("answer"):
+                    logger.info(f"精确问题命中缓存: {cache_key}")
+                    return entry["answer"]
+
+            for entry in entries:
+                if entry.get("answer"):
+                    logger.info(f"精确 key 命中缓存: {cache_key}")
+                    return entry["answer"]
+
+        # 2. 允许命中“更大结果集”的缓存，但只返回当前问题实际命中的部门
+        requested_departments = set(metadata["departments"])
+        requested_actions = set(metadata["actions"])
+        salary_related = metadata["salary_related"]
+
+        if requested_departments:
+            for cached_entries in self._cache.values():
+                for entry in cached_entries:
+                    cached_departments = set(entry.get("departments", []))
+                    if not cached_departments:
+                        continue
+                    if not requested_departments.issubset(cached_departments):
+                        continue
+                    if requested_actions != set(entry.get("actions", [])):
+                        continue
+                    if salary_related != entry.get("salary_related", False):
+                        continue
+
+                    rebuilt_answer = self._rebuild_cached_answer(question, entry)
+                    if rebuilt_answer:
+                        logger.info(
+                            "命中可裁剪缓存，已按当前问题过滤部门后重建回答"
+                        )
+                        return rebuilt_answer
+
         logger.info(f"当前缓存keys: {list(self._cache.keys())}")
         logger.info("缓存未命中")
         return None
-    
-    def _add_to_cache(self, question: str, answer: str):
-        """将结果添加到缓存"""
-        cache_key = self._get_cache_key(question)
-        
-        if cache_key not in self._cache:
-            self._cache[cache_key] = []
-        
-        # 限制每个key最多存3个答案
-        if len(self._cache[cache_key]) < 3:
-            self._cache[cache_key].append(answer)
-            logger.info(f"结果已加入缓存: {cache_key}")
+
+    def _add_to_cache(
+        self,
+        question: str,
+        answer: str,
+        intent: Optional[str] = None,
+        sql_result: Optional[Dict[str, Any]] = None,
+        analysis_result: Optional[Dict[str, Any]] = None,
+        search_result: Optional[Dict[str, Any]] = None,
+    ):
+        """将结果添加到缓存。"""
+        metadata = self._build_cache_metadata(question)
+        cache_key = metadata["cache_key"]
+
+        cache_entry = {
+            "question": question,
+            "answer": answer,
+            "intent": intent,
+            "sql_result": sql_result,
+            "analysis_result": analysis_result,
+            "search_result": search_result,
+            "departments": metadata["departments"],
+            "actions": metadata["actions"],
+            "salary_related": metadata["salary_related"],
+        }
+
+        existing_entries = self._cache.get(cache_key, [])
+        existing_entries = [
+            entry for entry in existing_entries if entry.get("question") != question
+        ]
+        existing_entries.insert(0, cache_entry)
+        self._cache[cache_key] = existing_entries[:3]
+
+        logger.info(f"结果已加入缓存: {cache_key}")
     
     def _build_graph(self) -> StateGraph:
         """构建LangGraph状态图（支持6种意图路由）"""
@@ -805,7 +1040,14 @@ class MasterAgent:
             self._extract_and_save_memory(all_messages, user_id)
         
         # 缓存结果
-        self._add_to_cache(question, answer)
+        self._add_to_cache(
+            question,
+            answer,
+            intent=final_state.get("intent"),
+            sql_result=final_state.get("sql_result"),
+            analysis_result=final_state.get("analysis_result"),
+            search_result=final_state.get("search_result"),
+        )
         
         return answer
     
@@ -1080,7 +1322,14 @@ class MasterAgent:
         yield sse("done", answer=final_answer)
         
         # 缓存结果
-        self._add_to_cache(question, final_answer)
+        self._add_to_cache(
+            question,
+            final_answer,
+            intent=intent,
+            sql_result=sql_result,
+            analysis_result=analysis_result,
+            search_result=search_result,
+        )
         
         # --- 保存对话历史到 LangGraph checkpointer ---
         try:
