@@ -27,3 +27,11 @@ memory:
 search:
   tavily_api_key: "${TAVILY_API_KEY}"  # Tavily API Key，申请地址：https://tavily.com
   max_results: 5  # 每次搜索返回最大结果数
+
+# Milvus 向量数据库配置
+milvus:
+  enabled: true  # 是否启用 Milvus 向量检索
+  embedded: false  # 是否使用 embedded Milvus（Windows 不支持）
+  host: "localhost"
+  port: 19530
+  vector_search_threshold: 20  # 记忆数量超过此值时启用向量检索

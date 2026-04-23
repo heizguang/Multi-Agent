@@ -27,6 +27,7 @@ data/long_term_memory.db
 # ===== 日志文件 =====
 logs/
 data/
+milvus_data/
 # ===== API Key / 环境变量（不上传密钥）=====
 .env
 .env.local

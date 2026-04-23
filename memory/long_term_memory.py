@@ -2,8 +2,10 @@
 长期记忆管理器
 
 负责用户偏好、知识的存储、检索、更新与访问热度维护。
+支持向量检索（Milvus）和传统 FTS5/LIKE 检索。
 """
 
+import logging
 import math
 import re
 import sqlite3
@@ -11,14 +13,45 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+logger = logging.getLogger(__name__)
+
 
 class LongTermMemory:
-    """长期记忆管理器，支持 FTS5、访问热度与时间衰减排序。"""
+    """长期记忆管理器，支持 FTS5、访问热度与时间衰减排序，集成向量检索。"""
 
-    def __init__(self, memory_db_path: str = "./data/long_term_memory.db"):
+    def __init__(
+        self,
+        memory_db_path: str = "./data/long_term_memory.db",
+        vector_store=None,
+        use_vector_threshold: int = 100
+    ):
+        """
+        初始化长期记忆管理器
+        
+        Args:
+            memory_db_path: SQLite 数据库路径
+            vector_store: 向量存储实例 (VectorStore)
+            use_vector_threshold: 记忆数量超过此值时启用向量检索，默认 100
+        """
         self.db_path = memory_db_path
+        self.vector_store = vector_store
+        self.use_vector_threshold = use_vector_threshold
         self.fts_enabled = False
         self._ensure_database()
+
+    def _get_knowledge_count(self, user_id: str) -> int:
+        """获取用户的知识数量"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM user_knowledge WHERE user_id = ?",
+                (user_id,)
+            )
+            result = cursor.fetchone()
+            return result["cnt"] if result else 0
+        finally:
+            conn.close()
 
     def _ensure_database(self):
         """确保数据库存在，并对旧库执行轻量迁移。"""
@@ -252,9 +285,14 @@ class LongTermMemory:
                 (user_id, category, content, confidence),
             )
             conn.commit()
+
+            if self.vector_store and self.vector_store.is_available():
+                self.vector_store.add_memory(user_id, content, category)
+                logger.info(f"知识已同时保存到向量存储")
+
             return True
         except Exception as e:
-            print(f"保存知识失败: {e}")
+            logger.warning(f"保存知识失败: {e}")
             return False
         finally:
             conn.close()
@@ -285,6 +323,68 @@ class LongTermMemory:
     def get_relevant_knowledge(
         self, user_id: str, query: str, top_k: int = 3
     ) -> List[Dict[str, Any]]:
+        knowledge_count = self._get_knowledge_count(user_id)
+        
+        use_vector = (
+            self.vector_store and 
+            self.vector_store.is_available() and 
+            knowledge_count >= self.use_vector_threshold
+        )
+        
+        if use_vector:
+            logger.info(f"使用向量检索（知识数量: {knowledge_count} >= {self.use_vector_threshold}）")
+            return self._vector_search(user_id, query, top_k)
+        
+        logger.info(f"使用传统检索（知识数量: {knowledge_count} < {self.use_vector_threshold}）")
+        return self._keyword_search(user_id, query, top_k)
+
+    def _vector_search(
+        self, user_id: str, query: str, top_k: int
+    ) -> List[Dict[str, Any]]:
+        """向量检索"""
+        try:
+            vector_results = self.vector_store.search(user_id, query, top_k * 2)
+            if not vector_results:
+                return self._keyword_search(user_id, query, top_k)
+            
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            results = []
+            for vec_result in vector_results[:top_k]:
+                content = vec_result.get("content", "")
+                category = vec_result.get("category", "")
+                
+                cursor.execute(
+                    """
+                    SELECT knowledge_id, category, content, confidence, access_count, last_accessed, created_at
+                    FROM user_knowledge
+                    WHERE user_id = ? AND content = ? AND category = ?
+                    LIMIT 1
+                    """,
+                    (user_id, content, category)
+                )
+                row = cursor.fetchone()
+                if row:
+                    row_dict = dict(row)
+                    row_dict["effective_score"] = 1.0 - vec_result.get("distance", 1.0)
+                    row_dict["vector_distance"] = vec_result.get("distance")
+                    results.append(row_dict)
+            
+            conn.close()
+            
+            if results:
+                self._mark_knowledge_accessed([r["knowledge_id"] for r in results])
+            
+            return results
+        except Exception as e:
+            logger.warning(f"向量检索失败，回退到关键词检索: {e}")
+            return self._keyword_search(user_id, query, top_k)
+
+    def _keyword_search(
+        self, user_id: str, query: str, top_k: int
+    ) -> List[Dict[str, Any]]:
+        """关键词检索（原有逻辑）"""
         candidates = self._fetch_candidate_knowledge(user_id, query, max(top_k * 4, 8))
 
         scored_rows = []

@@ -51,6 +51,7 @@ from agents.analysis_agent import DataAnalysisAgent
 from agents.search_agent import WebSearchAgent
 from memory.long_term_memory import LongTermMemory
 from memory.memory_extractor import MemoryExtractor
+from memory.vector_store import VectorStore, create_embedding_function
 
 
 class MasterAgentState(TypedDict):
@@ -238,8 +239,30 @@ class MasterAgent:
         # 初始化短期记忆（MemorySaver）
         self.memory = MemorySaver()
         
+        # 初始化向量存储（可选，默认关闭，数据量超过阈值才启用）
+        self.vector_store = None
+        milvus_enabled = os.getenv("MILVUS_ENABLED", "false").lower() == "true"
+        if milvus_enabled:
+            try:
+                embedding_func = create_embedding_function(llm, dim=1024)
+                use_embedded = os.getenv("MILVUS_EMBEDDED", "true").lower() == "true"
+                self.vector_store = VectorStore(
+                    host=os.getenv("MILVUS_HOST", "localhost"),
+                    port=int(os.getenv("MILVUS_PORT", "19530")),
+                    embedding_func=embedding_func,
+                    enabled=True,
+                    use_embedded=use_embedded
+                )
+                logger.info("Milvus 向量存储已启用")
+            except Exception as e:
+                logger.warning(f"Milvus 向量存储初始化失败: {e}")
+        
         # 初始化长期记忆（LongTermMemory）
-        self.long_term_memory = LongTermMemory(memory_db_path)
+        self.long_term_memory = LongTermMemory(
+            memory_db_path,
+            vector_store=self.vector_store,
+            use_vector_threshold=int(os.getenv("VECTOR_SEARCH_THRESHOLD", "100"))
+        )
         
         # 初始化记忆提取器
         self.memory_extractor = MemoryExtractor(llm)
