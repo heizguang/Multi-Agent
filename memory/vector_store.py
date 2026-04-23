@@ -2,7 +2,7 @@
 Milvus 向量存储模块
 
 用于长期记忆的向量检索。
-支持 embedded Milvus（无需 Docker）。
+支持 Milvus standalone 模式。
 """
 
 import logging
@@ -14,25 +14,14 @@ logger = logging.getLogger(__name__)
 
 try:
     from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility
-    from milvus_model.hybrid import MilvusLocalHybridStore
-except ImportError:
+except (ImportError, AttributeError) as e:
+    logger.warning(f"pymilvus 导入失败: {e}，向量检索功能不可用")
     connections = None
     Collection = None
 
 
-def start_embedded_milvus():
-    """启动 embedded Milvus"""
-    try:
-        from milvus_model.hybrid import MilvusLocalHybridStore
-        logger.info("Embedded Milvus 可用")
-        return True
-    except ImportError:
-        logger.warning("milvus_model 未安装，请运行: pip install milvus-model")
-        return False
-
-
 class VectorStore:
-    """Milvus 向量存储管理器，支持 embedded 和 standalone 模式"""
+    """Milvus 向量存储管理器，支持 standalone 模式"""
 
     def __init__(
         self,
@@ -231,40 +220,25 @@ def create_embedding_function(llm, dim: int = 1024):
     """创建 embedding 函数"""
     def embed_text(text: str) -> List[float]:
         try:
-            from langchain_core.outputs import Generation
-            from langchain_core.callbacks import CallbackManager
-            from langchain_core.outputs import LLMResult
-
-            class EmbeddingCallbackHandler:
-                def __init__(self):
-                    self.embeddings = []
-
-                def on_llm_new_token(self, token: str, **kwargs):
-                    pass
-
-                def on_llm_end(self, response: LLMResult, **kwargs):
-                    for gen in response.generations:
-                        for g in gen:
-                            if hasattr(g, 'text') and g.text:
-                                try:
-                                    import json
-                                    data = json.loads(g.text)
-                                    if isinstance(data, list):
-                                        self.embeddings.extend(data)
-                                except:
-                                    pass
-
             prompt = f"""请将以下文本转换为一个 {dim} 维的向量表示。
 只返回一个 JSON 数组，不要其他文字。
 文本：{text}
 向量："""
 
-            handler = EmbeddingCallbackHandler()
-            llm.invoke(prompt, config={"callbacks": [handler]})
-
-            if handler.embeddings:
-                return handler.embeddings[:dim]
-
+            response = llm.invoke(prompt)
+            
+            if hasattr(response, 'content'):
+                response_text = response.content
+            elif hasattr(response, 'text'):
+                response_text = response.text
+            else:
+                response_text = str(response)
+            
+            import json
+            data = json.loads(response_text)
+            if isinstance(data, list):
+                return data[:dim]
+            
             return [0.0] * dim
         except Exception as e:
             logger.warning(f"生成 embedding 失败: {e}")
