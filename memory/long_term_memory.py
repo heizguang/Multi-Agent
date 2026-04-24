@@ -328,6 +328,10 @@ class LongTermMemory:
     def get_relevant_knowledge(
         self, user_id: str, query: str, top_k: int = 3
     ) -> List[Dict[str, Any]]:
+
+
+
+        import time
         knowledge_count = self._get_knowledge_count(user_id)
         
         use_vector = (
@@ -336,12 +340,45 @@ class LongTermMemory:
             knowledge_count >= self.use_vector_threshold
         )
         
-        if use_vector:
-            logger.info(f"使用向量检索（知识数量: {knowledge_count} >= {self.use_vector_threshold}）")
-            return self._vector_search(user_id, query, top_k)
+        if not use_vector:
+            logger.info(f"使用传统检索（知识数量: {knowledge_count} < {self.use_vector_threshold}）")
+            return self._keyword_search(user_id, query, top_k)
         
-        logger.info(f"使用传统检索（知识数量: {knowledge_count} < {self.use_vector_threshold}）")
-        return self._keyword_search(user_id, query, top_k)
+        logger.info(f"使用向量检索（知识数量: {knowledge_count} >= {self.use_vector_threshold}）")
+        
+        vector_results = []
+        vector_time = 0.0
+        keyword_results = []
+        keyword_time = 0.0
+        
+        try:
+            start_time = time.time()
+            vector_results = self._vector_search(user_id, query, top_k)
+            vector_time = time.time() - start_time
+        except Exception as e:
+            logger.warning(f"向量检索失败: {e}")
+        
+        try:
+            start_time = time.time()
+            keyword_results = self._keyword_search(user_id, query, top_k)
+            keyword_time = time.time() - start_time
+        except Exception as e:
+            logger.warning(f"关键词检索失败: {e}")
+        
+        logger.info(f"向量检索耗时: {vector_time:.3f}s, 关键词检索耗时: {keyword_time:.3f}s")
+        logger.info(f"向量结果数: {len(vector_results)}, 关键词结果数: {len(keyword_results)}")
+        
+        combined_results = []
+        for r in vector_results:
+            r["search_method"] = "vector"
+            r["search_time"] = vector_time
+            combined_results.append(r)
+        for r in keyword_results:
+            r["search_method"] = "keyword"
+            r["search_time"] = keyword_time
+            combined_results.append(r)
+        
+        return combined_results
 
     def _vector_search(
         self, user_id: str, query: str, top_k: int

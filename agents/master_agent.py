@@ -1600,15 +1600,37 @@ class MasterAgent:
                     last_sql_text = json.dumps(parsed_data, ensure_ascii=False)
 
         knowledge_text = ""
+        knowledge_comparison = ""
         if user_id:
             try:
                 knowledge = self.long_term_memory.get_relevant_knowledge(user_id, question, top_k=4)
-                knowledge_lines = [
-                    f"- {item['content']}"
-                    for item in knowledge
-                    if isinstance(item, dict) and item.get("content")
-                ]
-                knowledge_text = "\n".join(knowledge_lines)
+                logger.info(f"知识检索结果数量: {len(knowledge)}")
+                
+                vector_results = [item for item in knowledge if item.get("search_method") == "vector"]
+                keyword_results = [item for item in knowledge if item.get("search_method") == "keyword"]
+                
+                logger.info(f"向量结果: {len(vector_results)}, 关键词结果: {len(keyword_results)}")
+                
+                vector_time = 0
+                keyword_time = 0
+                
+                if vector_results:
+                    vector_time = vector_results[0].get("search_time", 0)
+                    vector_lines = [f"- {item['content']}" for item in vector_results if item.get("content")]
+                    knowledge_text += "【向量数据库检索结果】\n" + "\n".join(vector_lines) + f"\n(耗时: {vector_time:.3f}s)\n\n"
+                
+                if keyword_results:
+                    keyword_time = keyword_results[0].get("search_time", 0)
+                    keyword_lines = [f"- {item['content']}" for item in keyword_results if item.get("content")]
+                    knowledge_text += "【普通数据库检索结果】\n" + "\n".join(keyword_lines) + f"\n(耗时: {keyword_time:.3f}s)"
+                
+                if vector_time > 0 and keyword_time > 0:
+                    speed_diff = "向量检索" if vector_time < keyword_time else "普通检索"
+                    faster_time = min(vector_time, keyword_time)
+                    slower_time = max(vector_time, keyword_time)
+                    knowledge_comparison = f"\n\n速度对比: {speed_diff}更快 ({faster_time:.3f}s vs {slower_time:.3f}s)"
+                    knowledge_text += knowledge_comparison
+                    
             except Exception as e:
                 logger.warning(f"读取长期记忆失败: {e}")
 
@@ -1630,10 +1652,7 @@ class MasterAgent:
         if not any(memory_context.values()):
             return None
 
-        prompt = f"""你是一个对话记忆助手。请只根据给定的记忆回答当前问题。
-
-如果这些记忆已经明确包含答案，就直接回答，尽量简洁准确。
-如果记忆不足、信息不确定、或者仍然需要重新查数据库确认，请只返回 NEED_FRESH_DATA。
+        prompt = f"""你是一个对话记忆助手。请根据给定的记忆回答当前问题。
 
 当前问题：
 {question}
@@ -1647,13 +1666,13 @@ class MasterAgent:
 最近一次结构化查询结果：
 {memory_context['last_sql_text'] or '无'}
 
-长期记忆：
+长期记忆（包含向量检索和普通检索的对比）：
 {memory_context['knowledge_text'] or '无'}
 
 要求：
-1. 只能依据提供的记忆回答，不能补充猜测。
-2. 如果记忆里已经有明确数值或结论，优先直接复用。
-3. 如果当前问题是在追问上一轮结果，也按已确认结论直接作答。
+1. 必须同时展示向量数据库和普通数据库的检索结果。
+2. 必须包含两种检索方式的耗时对比。
+3. 如果两者结果一致，说明结果可靠；如果不一致，需要指出差异。
 4. 记忆不足时只返回 NEED_FRESH_DATA。"""
 
         try:
