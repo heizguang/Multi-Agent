@@ -35,7 +35,8 @@ from agents.analysis_agent import DataAnalysisAgent
 from agents.search_agent import WebSearchAgent
 from memory.long_term_memory import LongTermMemory
 from memory.memory_extractor import MemoryExtractor
-from memory.vector_store import VectorStore, create_embedding_function
+from memory.vector_store import VectorStore
+import requests
 
 
 class MasterAgentState(TypedDict):
@@ -228,12 +229,33 @@ class MasterAgent:
         milvus_enabled = os.getenv("MILVUS_ENABLED", "false").lower() == "true"
         if milvus_enabled:
             try:
-                embedding_func = create_embedding_function(llm, dim=1024)
-                use_embedded = os.getenv("MILVUS_EMBEDDED", "true").lower() == "true"
+                # 使用 SiliconFlow embedding API
+                embedding_base_url = os.getenv("EMBEDDING_BASE_URL")
+                embedding_api_key = os.getenv("EMBEDDING_API_KEY")
+                embedding_model = os.getenv("EMBEDDING_MODEL")
+                
+                def embedding_func(text: str):
+                    try:
+                        response = requests.post(
+                            f"{embedding_base_url}/embeddings",
+                            headers={"Authorization": f"Bearer {embedding_api_key}", "Content-Type": "application/json"},
+                            json={"model": embedding_model, "input": text},
+                            timeout=60
+                        )
+                        if response.status_code == 200:
+                            data = response.json()
+                            if "data" in data and len(data["data"]) > 0:
+                                return data["data"][0]["embedding"]
+                    except Exception as e:
+                        logger.warning(f"生成 embedding 失败: {e}")
+                    return None
+                
+                use_embedded = os.getenv("MILVUS_EMBEDDED", "false").lower() == "true"
                 self.vector_store = VectorStore(
                     host=os.getenv("MILVUS_HOST", "localhost"),
                     port=int(os.getenv("MILVUS_PORT", "19530")),
                     embedding_func=embedding_func,
+                    embedding_dim=4096,
                     enabled=True,
                     use_embedded=use_embedded
                 )
