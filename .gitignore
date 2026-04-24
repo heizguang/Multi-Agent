@@ -16,7 +16,13 @@ venv/
 env/
 ENV/
 .venv/
-
+test_llm.py
+llm_result.txt
+api_result.txt
+api_response.txt
+embedding_result.txt
+embedding_debug.txt
+batch_import_vectors.py
 # ===== 数据库文件（含用户隐私数据）=====
 *.db
 *.sqlite

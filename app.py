@@ -474,32 +474,22 @@ if __name__ == '__main__':
             logger.info("Milvus 服务已在运行")
             return True
         
-        logger.info("正在启动 Milvus 服务...")
+        logger.info("正在启动 Milvus 服务（后台运行）...")
         try:
             import shutil
             milvus_cmd = shutil.which("milvus-server")
             if not milvus_cmd:
                 milvus_cmd = "milvus-server"
             
-            logger.info(f"使用命令: {milvus_cmd}")
-            
-            proc = subprocess.Popen(
+            subprocess.Popen(
                 [milvus_cmd, "--data", str(milvus_data_dir)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
-            import time
-            for i in range(30):
-                if check_milvus_running():
-                    logger.info("Milvus 服务启动成功")
-                    return True
-                time.sleep(1)
-                if i % 5 == 0:
-                    logger.info(f"等待 Milvus 启动... ({i+1}s)")
-            
-            logger.warning("Milvus 服务启动超时")
-            return False
+            logger.info("Milvus 服务已在后台启动，请稍候（约30秒）...")
+            return True
         except Exception as e:
             logger.warning(f"启动 Milvus 服务失败: {e}")
             return False
