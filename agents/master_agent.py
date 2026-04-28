@@ -2901,6 +2901,7 @@ class MasterAgent:
         sql_result = None
         analysis_result = None
         search_result = None
+        anomaly_result = None
         final_answer = ""
 
         if intent == "simple_answer":
