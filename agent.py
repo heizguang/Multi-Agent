@@ -350,6 +350,13 @@ class MultiAgentSystem:
             "provider": self.config["llm"].get("provider", "dashscope")
         }
 
+    def export_last_report(self, export_format: str = "xlsx") -> Dict[str, Any]:
+        """导出当前会话最近一次结果。"""
+        if not self.user_id:
+            raise ValueError("请先登录后再导出报表")
+        thread_id = f"{self.user_id}_{self.session_id}"
+        return self.master_agent.export_last_report(thread_id, export_format=export_format)
+
 SQLAgent = MultiAgentSystem
 
 def main():

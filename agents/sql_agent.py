@@ -36,6 +36,7 @@ class SQLQueryAgent:
         self.db_path = db_path
         self.num_examples = num_examples
         self._schema_cache: List[Dict[str, Any]] | None = None
+        self._schema_selection_cache: Dict[str, str] = {}
 
     @staticmethod
     def _llm_to_str(result) -> str:
@@ -74,6 +75,26 @@ class SQLQueryAgent:
             table_name = table[0]
             cursor.execute(f"PRAGMA table_info({table_name})")
             columns = cursor.fetchall()
+            cursor.execute(f"PRAGMA foreign_key_list({table_name})")
+            foreign_keys = cursor.fetchall()
+            sample_values: Dict[str, List[str]] = {}
+            for _, name, dtype, *_ in columns:
+                dtype_text = str(dtype or "").upper()
+                if not any(token in dtype_text for token in ("CHAR", "TEXT", "VARCHAR")):
+                    continue
+                try:
+                    cursor.execute(
+                        f"""
+                        SELECT DISTINCT {name}
+                        FROM {table_name}
+                        WHERE {name} IS NOT NULL AND TRIM(CAST({name} AS TEXT)) != ''
+                        LIMIT 3
+                        """
+                    )
+                    sample_rows = cursor.fetchall()
+                    sample_values[name] = [str(row[0]) for row in sample_rows if row and row[0] is not None]
+                except Exception:
+                    sample_values[name] = []
             schema_items.append(
                 {
                     "table_name": table_name,
@@ -86,6 +107,15 @@ class SQLQueryAgent:
                         }
                         for _, name, dtype, notnull, _, pk in columns
                     ],
+                    "foreign_keys": [
+                        {
+                            "from": fk[3],
+                            "to_table": fk[2],
+                            "to_column": fk[4],
+                        }
+                        for fk in foreign_keys
+                    ],
+                    "sample_values": sample_values,
                 }
             )
 
@@ -103,6 +133,15 @@ class SQLQueryAgent:
                 schema_text += (
                     f"  - {col['name']}: {col['dtype']}{notnull_text}{pk_text}\n"
                 )
+                sample_values = item.get("sample_values", {}).get(col["name"], [])
+                if sample_values:
+                    schema_text += f"    示例值: {', '.join(sample_values)}\n"
+            foreign_keys = item.get("foreign_keys", [])
+            if foreign_keys:
+                for fk in foreign_keys:
+                    schema_text += (
+                        f"  - 关联: {fk['from']} -> {fk['to_table']}.{fk['to_column']}\n"
+                    )
         return schema_text.strip()
 
     def _extract_query_terms(self, question: str) -> List[str]:
@@ -139,6 +178,15 @@ class SQLQueryAgent:
 
         table_name = schema_item["table_name"].lower()
         column_names = [col["name"].lower() for col in schema_item["columns"]]
+        related_tables = [
+            str(fk.get("to_table", "")).lower()
+            for fk in schema_item.get("foreign_keys", [])
+        ]
+        sample_values = [
+            str(value).lower()
+            for values in schema_item.get("sample_values", {}).values()
+            for value in values
+        ]
         score = 0.0
 
         for term in terms:
@@ -147,6 +195,10 @@ class SQLQueryAgent:
                 score += 2.5
             if any(lowered == col or lowered in col for col in column_names):
                 score += 1.5
+            if any(lowered and lowered in sample for sample in sample_values):
+                score += 2.2
+            if any(lowered == related or lowered in related for related in related_tables):
+                score += 1.0
 
         if any(alias in question for alias in ["薪资", "工资", "奖金"]) and table_name == "salaries":
             score += 2.0
@@ -154,6 +206,12 @@ class SQLQueryAgent:
             score += 2.0
         if any(alias in question for alias in ["部门", "城市", "地点"]) and table_name == "departments":
             score += 2.0
+        if any(city in question for city in ["北京", "上海", "广州", "深圳"]):
+            if table_name == "departments":
+                score += 1.5
+        if any(dept in question for dept in ["研发部", "市场部", "产品部", "设计部", "销售部"]):
+            if table_name in {"departments", "employees", "salaries"}:
+                score += 1.5
 
         return score
 
@@ -161,6 +219,11 @@ class SQLQueryAgent:
         schema_items = self._load_schema_cache()
         if not question:
             return self._format_schema(schema_items)
+
+        cache_key = f"{question.strip().lower()}|{max_tables}"
+        cached_schema = self._schema_selection_cache.get(cache_key)
+        if cached_schema:
+            return cached_schema
 
         scored_items = [
             (self._score_schema_item(item, question), item) for item in schema_items
@@ -186,7 +249,9 @@ class SQLQueryAgent:
                     selected_items.append(item)
                     break
 
-        return self._format_schema(selected_items)
+        formatted_schema = self._format_schema(selected_items)
+        self._schema_selection_cache[cache_key] = formatted_schema
+        return formatted_schema
 
     def _clean_sql(self, sql: str) -> str:
         sql = sql.strip()
@@ -204,7 +269,32 @@ class SQLQueryAgent:
         if sql.endswith("```"):
             sql = sql[:-3]
 
-        return sql.strip()
+        sql = sql.strip().rstrip(";").strip()
+        return sql
+
+    def _is_safe_sql(self, sql: str) -> bool:
+        normalized = re.sub(r"\s+", " ", sql.strip()).lower()
+        if not normalized:
+            return False
+        if ";" in normalized:
+            return False
+        if not (normalized.startswith("select ") or normalized.startswith("with ")):
+            return False
+        blocked = [
+            " insert ",
+            " update ",
+            " delete ",
+            " drop ",
+            " alter ",
+            " truncate ",
+            " attach ",
+            " detach ",
+            " pragma ",
+            " create ",
+            " replace ",
+        ]
+        wrapped = f" {normalized} "
+        return not any(token in wrapped for token in blocked)
 
     def _rule_based_sql(self, question: str) -> str:
         q = question.strip()
@@ -359,6 +449,10 @@ class SQLQueryAgent:
             if not sql:
                 result["error"] = "未能生成有效的 SQL"
                 logger.error("SQL Agent 未能生成有效的 SQL")
+                return result
+            if not self._is_safe_sql(sql):
+                result["error"] = "生成的 SQL 未通过安全校验，仅允许单条 SELECT / WITH 查询"
+                logger.error(result["error"])
                 return result
 
             for attempt in range(max_retries):

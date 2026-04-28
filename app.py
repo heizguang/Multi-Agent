@@ -3,7 +3,7 @@ Flask Web API for Multi-Agent Data Query System
 提供RESTful API接口供前端调用，支持普通查询和流式SSE查询。
 """
 
-from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
+from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context, send_file
 from flask_cors import CORS
 import os
 import sys
@@ -450,9 +450,34 @@ def health():
             'sql_self_correction': True,
             'streaming': True,
             'web_search': search_available,
-            'data_visualization': True
+            'data_visualization': True,
+            'report_export': True,
+            'anomaly_detection': True
         }
     })
+
+
+@app.route('/api/export_report', methods=['POST'])
+def export_report():
+    """导出最近一次查询结果为 PDF / Excel。"""
+    try:
+        data = request.json or {}
+        user_id = data.get('user_id', 'guest')
+        export_format = str(data.get('format', 'xlsx')).lower()
+
+        system = get_or_create_system(user_id)
+        export_result = system.export_last_report(export_format=export_format)
+        return send_file(
+            export_result["path"],
+            mimetype=export_result["content_type"],
+            as_attachment=True,
+            download_name=export_result["filename"],
+        )
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 
 if __name__ == '__main__':

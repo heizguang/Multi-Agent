@@ -7,7 +7,16 @@
 from .master_agent import MasterAgent
 from .sql_agent import SQLQueryAgent
 from .analysis_agent import DataAnalysisAgent
+from .anomaly_agent import AnomalyDetectionAgent
+from .report_agent import ReportAgent
 from .search_agent import WebSearchAgent
 
-__all__ = ['MasterAgent', 'SQLQueryAgent', 'DataAnalysisAgent', 'WebSearchAgent']
+__all__ = [
+    'MasterAgent',
+    'SQLQueryAgent',
+    'DataAnalysisAgent',
+    'AnomalyDetectionAgent',
+    'ReportAgent',
+    'WebSearchAgent',
+]
 

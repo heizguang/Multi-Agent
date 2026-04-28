@@ -89,11 +89,32 @@ class LongTermMemory:
                 cursor.execute(
                     "ALTER TABLE user_knowledge ADD COLUMN last_accessed TIMESTAMP"
                 )
+            if "canonical_key" not in columns:
+                cursor.execute(
+                    "ALTER TABLE user_knowledge ADD COLUMN canonical_key TEXT"
+                )
+            if "is_archived" not in columns:
+                cursor.execute(
+                    "ALTER TABLE user_knowledge ADD COLUMN is_archived INTEGER DEFAULT 0"
+                )
 
             cursor.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_knowledge_last_accessed
                 ON user_knowledge(last_accessed)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_knowledge_canonical_key
+                ON user_knowledge(user_id, canonical_key)
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE user_knowledge
+                SET canonical_key = LOWER(TRIM(content))
+                WHERE canonical_key IS NULL OR canonical_key = ''
                 """
             )
 
@@ -275,6 +296,11 @@ class LongTermMemory:
         content: str,
         confidence: float = 0.8,
     ) -> bool:
+        normalized_content = content.strip()
+        if not normalized_content:
+            return False
+
+        canonical_key = self._normalize_content_key(category, normalized_content)
         conn = self._get_connection()
         cursor = conn.cursor()
 
@@ -282,17 +308,50 @@ class LongTermMemory:
             self.create_or_update_user(user_id)
             cursor.execute(
                 """
-                INSERT INTO user_knowledge (
-                    user_id, category, content, confidence, access_count, last_accessed, created_at
-                )
-                VALUES (?, ?, ?, ?, 0, NULL, CURRENT_TIMESTAMP)
+                SELECT knowledge_id, confidence
+                FROM user_knowledge
+                WHERE user_id = ? AND canonical_key = ? AND category = ?
+                ORDER BY knowledge_id DESC
+                LIMIT 1
                 """,
-                (user_id, category, content, confidence),
+                (user_id, canonical_key, category),
             )
+            existing = cursor.fetchone()
+            if existing:
+                cursor.execute(
+                    """
+                    UPDATE user_knowledge
+                    SET confidence = CASE
+                        WHEN confidence < ? THEN ?
+                        ELSE confidence
+                    END,
+                        content = ?,
+                        is_archived = 0,
+                        last_accessed = CURRENT_TIMESTAMP,
+                        access_count = COALESCE(access_count, 0) + 1
+                    WHERE knowledge_id = ?
+                    """,
+                    (confidence, confidence, normalized_content, existing["knowledge_id"]),
+                )
+                conn.commit()
+                return True
+
+            cursor.execute(
+                """
+                INSERT INTO user_knowledge (
+                    user_id, category, content, confidence, access_count, last_accessed,
+                    created_at, canonical_key, is_archived
+                )
+                VALUES (?, ?, ?, ?, 0, NULL, CURRENT_TIMESTAMP, ?, 0)
+                """,
+                (user_id, category, normalized_content, confidence, canonical_key),
+            )
+            conn.commit()
+            self._archive_duplicate_knowledge(cursor, user_id, canonical_key)
             conn.commit()
 
             if self.vector_store and self.vector_store.is_available():
-                self.vector_store.add_memory(user_id, content, category)
+                self.vector_store.add_memory(user_id, normalized_content, category)
                 logger.info(f"知识已同时保存到向量存储")
 
             return True
@@ -312,7 +371,7 @@ class LongTermMemory:
             """
             SELECT knowledge_id, category, content, confidence, access_count, last_accessed, created_at
             FROM user_knowledge
-            WHERE user_id = ? AND category = ?
+            WHERE user_id = ? AND category = ? AND COALESCE(is_archived, 0) = 0
             ORDER BY confidence DESC, created_at DESC
             LIMIT ?
             """,
@@ -467,7 +526,8 @@ class LongTermMemory:
                     FROM user_knowledge uk
                     JOIN user_knowledge_fts fts
                       ON fts.rowid = uk.knowledge_id
-                    WHERE uk.user_id = ? AND user_knowledge_fts MATCH ?
+                    WHERE uk.user_id = ? AND COALESCE(uk.is_archived, 0) = 0
+                      AND user_knowledge_fts MATCH ?
                     LIMIT ?
                     """,
                     (user_id, match_query, limit),
@@ -476,7 +536,7 @@ class LongTermMemory:
                 if rows:
                     return rows
 
-            where_clauses = ["user_id = ?"]
+            where_clauses = ["user_id = ?", "COALESCE(is_archived, 0) = 0"]
             params: List[Any] = [user_id]
 
             if tokens:
@@ -508,7 +568,7 @@ class LongTermMemory:
                 SELECT knowledge_id, category, content, confidence,
                        access_count, last_accessed, created_at
                 FROM user_knowledge
-                WHERE user_id = ?
+                WHERE user_id = ? AND COALESCE(is_archived, 0) = 0
                 ORDER BY confidence DESC, created_at DESC
                 LIMIT ?
                 """,
@@ -557,6 +617,7 @@ class LongTermMemory:
 
         last_touch = row.get("last_accessed") or row.get("created_at")
         age_days = self._days_since(last_touch)
+        decayed_confidence = confidence * max(0.6, math.exp(-age_days / 240.0))
         recency_factor = math.exp(-age_days / 30.0)
         access_boost = min(math.log1p(access_count) / 4.0, 0.35)
 
@@ -568,10 +629,48 @@ class LongTermMemory:
             overlap = hit_count / len(overlap_tokens)
 
         return (
-            confidence * 0.55
+            decayed_confidence * 0.55
             + recency_factor * 0.20
             + access_boost * 0.10
             + overlap * 0.15
+        )
+
+    def _normalize_content_key(self, category: str, content: str) -> str:
+        normalized = re.sub(r"\s+", " ", f"{category}:{content}".strip().lower())
+        return normalized[:512]
+
+    def _archive_duplicate_knowledge(
+        self,
+        cursor: sqlite3.Cursor,
+        user_id: str,
+        canonical_key: str,
+    ) -> None:
+        cursor.execute(
+            """
+            SELECT knowledge_id
+            FROM user_knowledge
+            WHERE user_id = ? AND canonical_key = ?
+            ORDER BY confidence DESC, access_count DESC, knowledge_id DESC
+            """,
+            (user_id, canonical_key),
+        )
+        rows = cursor.fetchall()
+        if len(rows) <= 1:
+            return
+
+        keep_id = rows[0]["knowledge_id"]
+        archive_ids = [row["knowledge_id"] for row in rows[1:]]
+        placeholders = ", ".join("?" for _ in archive_ids)
+        cursor.execute(
+            f"""
+            UPDATE user_knowledge
+            SET is_archived = CASE
+                WHEN knowledge_id = ? THEN 0
+                ELSE 1
+            END
+            WHERE knowledge_id = ? OR knowledge_id IN ({placeholders})
+            """,
+            [keep_id, keep_id, *archive_ids],
         )
 
     def _days_since(self, dt_value: Optional[str]) -> float:
@@ -619,7 +718,7 @@ class LongTermMemory:
             SELECT knowledge_id, category, content, confidence,
                    access_count, last_accessed, created_at
             FROM user_knowledge
-            WHERE user_id = ?
+            WHERE user_id = ? AND COALESCE(is_archived, 0) = 0
             ORDER BY created_at DESC
             LIMIT ?
             """,

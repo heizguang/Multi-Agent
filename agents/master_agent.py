@@ -6,6 +6,7 @@
 """
 
 import concurrent.futures
+import hashlib
 import json
 import logging
 import os
@@ -32,6 +33,8 @@ from langchain_core.language_models import BaseLLM
 from prompts import get_master_intent_prompt, get_summary_prompt
 from agents.sql_agent import SQLQueryAgent
 from agents.analysis_agent import DataAnalysisAgent
+from agents.anomaly_agent import AnomalyDetectionAgent
+from agents.report_agent import ReportAgent
 from agents.search_agent import WebSearchAgent
 from memory.long_term_memory import LongTermMemory
 from memory.memory_extractor import MemoryExtractor
@@ -219,6 +222,8 @@ class MasterAgent:
         # 初始化子智能体
         self.sql_agent = SQLQueryAgent(llm, db_path, num_examples)
         self.analysis_agent = DataAnalysisAgent(llm)
+        self.anomaly_agent = AnomalyDetectionAgent()
+        self.report_agent = ReportAgent()
         self.search_agent = WebSearchAgent(llm, tavily_api_key=tavily_api_key)
         
         # 初始化短期记忆（MemorySaver）
@@ -279,6 +284,8 @@ class MasterAgent:
         
         # 结果缓存（问题关键词 -> 结构化缓存项列表）
         self._cache = {}
+        self._summary_cache_path = self.cache_store_path.parent / "summary_cache.json"
+        self._summary_cache: Dict[str, Dict[str, Any]] = {}
         self._conversation_store: Dict[str, List[Dict[str, str]]] = {}
         self._load_persistent_state()
         
@@ -328,6 +335,14 @@ class MasterAgent:
                 if isinstance(value, list)
             }
 
+        summary_cache_data = self._read_json_file(self._summary_cache_path, {})
+        if isinstance(summary_cache_data, dict):
+            self._summary_cache = {
+                str(key): value
+                for key, value in summary_cache_data.items()
+                if isinstance(value, dict)
+            }
+
     def _save_cache_to_disk(self) -> None:
         if self.cache_store_path.exists():
             snapshot_dir = self.cache_store_path.parent / "cache_snapshots"
@@ -343,6 +358,9 @@ class MasterAgent:
 
     def _save_conversation_store_to_disk(self) -> None:
         self._write_json_file(self.conversation_store_path, self._conversation_store)
+
+    def _save_summary_cache_to_disk(self) -> None:
+        self._write_json_file(self._summary_cache_path, self._summary_cache)
 
     def _serialize_message(self, message: BaseMessage) -> Optional[Dict[str, str]]:
         if isinstance(message, HumanMessage):
@@ -410,6 +428,102 @@ class MasterAgent:
             self.session_data[thread_id] = {}
         self.session_data[thread_id]["last_sql_result"] = result
         self._save_session_data_to_disk()
+
+    def _remember_pipeline_snapshot(
+        self,
+        thread_id: str,
+        question: str,
+        answer: str,
+        intent: Optional[str],
+        sql_result: Optional[Dict[str, Any]] = None,
+        analysis_result: Optional[Dict[str, Any]] = None,
+        search_result: Optional[Dict[str, Any]] = None,
+        anomaly_result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        thread_state = self.session_data.setdefault(thread_id, {})
+        thread_state["last_pipeline_result"] = {
+            "question": question,
+            "answer": answer,
+            "intent": intent,
+            "sql_result": sql_result,
+            "analysis_result": analysis_result,
+            "search_result": search_result,
+            "anomaly_result": anomaly_result,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self._save_session_data_to_disk()
+
+    def export_last_report(self, thread_id: str, export_format: str = "xlsx") -> Dict[str, Any]:
+        thread_state = self.session_data.get(thread_id, {})
+        pipeline_result = {}
+        if isinstance(thread_state, dict):
+            pipeline_result = thread_state.get("last_pipeline_result", {}) or {}
+
+        if not isinstance(pipeline_result, dict) or not pipeline_result.get("question"):
+            raise ValueError("当前会话还没有可导出的查询结果")
+
+        anomaly_result = pipeline_result.get("anomaly_result") or {}
+        analysis_result = pipeline_result.get("analysis_result") or {}
+        search_result = pipeline_result.get("search_result") or {}
+        payload = {
+            "question": pipeline_result.get("question", ""),
+            "answer": pipeline_result.get("answer", ""),
+            "intent": pipeline_result.get("intent", ""),
+            "sql_result": pipeline_result.get("sql_result"),
+            "analysis_summary": analysis_result.get("analysis", ""),
+            "anomaly_summary": anomaly_result.get("summary", ""),
+            "anomalies": anomaly_result.get("anomalies", []),
+            "sources": search_result.get("sources", []),
+        }
+        return self.report_agent.export(payload, export_format)
+
+    def _compose_analysis_text(
+        self,
+        analysis_result: Optional[Dict[str, Any]],
+        anomaly_result: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        sections: List[str] = []
+        if analysis_result and analysis_result.get("analysis"):
+            sections.append(str(analysis_result["analysis"]).strip())
+        if anomaly_result and anomaly_result.get("summary"):
+            sections.append(f"异常检测：{str(anomaly_result['summary']).strip()}")
+        merged = "\n\n".join(section for section in sections if section)
+        return merged or None
+
+    def _build_summary_cache_key(
+        self,
+        question: str,
+        sql_result: Any,
+        analysis_text: Any,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "question": question,
+                "sql_result": sql_result,
+                "analysis_text": analysis_text,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _get_summary_cache(self, cache_key: str) -> Optional[str]:
+        entry = self._summary_cache.get(cache_key)
+        if not isinstance(entry, dict):
+            return None
+        answer = entry.get("answer")
+        return str(answer) if isinstance(answer, str) and answer.strip() else None
+
+    def _set_summary_cache(self, cache_key: str, answer: str) -> None:
+        self._summary_cache[cache_key] = {
+            "answer": answer,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if len(self._summary_cache) > 200:
+            oldest_key = next(iter(self._summary_cache.keys()))
+            self._summary_cache.pop(oldest_key, None)
+        self._save_summary_cache_to_disk()
 
     def _remember_conversation_turn(self, thread_id: str, question: str, answer: str) -> None:
         config = {"configurable": {"thread_id": thread_id}}
@@ -1816,6 +1930,8 @@ class MasterAgent:
             result = self.analysis_agent.analyze(data_to_analyze, question)
             state["analysis_result"] = result
             state["metadata"]["analysis_result"] = result
+            anomaly_result = self.anomaly_agent.detect(data_to_analyze, question)
+            state["metadata"]["anomaly_result"] = anomaly_result
         except Exception as e:
             state["error"] = f"数据分析失败: {str(e)}"
             state["analysis_result"] = {"error": str(e)}
@@ -1844,10 +1960,13 @@ class MasterAgent:
             if sql_result.get("data"):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                     analysis_future = pool.submit(self.analysis_agent.analyze, sql_result["data"], question)
+                    anomaly_future = pool.submit(self.anomaly_agent.detect, sql_result["data"], question)
                     analysis_result = analysis_future.result()
+                    anomaly_result = anomaly_future.result()
                 
                 state["analysis_result"] = analysis_result
                 state["metadata"]["analysis_result"] = analysis_result
+                state["metadata"]["anomaly_result"] = anomaly_result
                 
                 if analysis_result.get("error"):
                     state["metadata"]["analysis_warning"] = analysis_result["error"]
@@ -1888,6 +2007,11 @@ class MasterAgent:
             state["metadata"]["sql_result"] = sql_result
             
             self._remember_last_sql_result(thread_id, sql_result)
+            if sql_result.get("data"):
+                state["metadata"]["anomaly_result"] = self.anomaly_agent.detect(
+                    sql_result["data"],
+                    question,
+                )
             
             # 再联网搜索 + 联合分析
             state["search_result"] = search_result
@@ -1919,6 +2043,7 @@ class MasterAgent:
         sql_result = state.get("sql_result")
         analysis_result = state.get("analysis_result")
         search_result = state.get("search_result")
+        anomaly_result = state.get("metadata", {}).get("anomaly_result")
         
         # 联网搜索相关意图：搜索智能体已生成完整回答
         if intent in ("web_search", "search_and_sql") and search_result:
@@ -1941,7 +2066,7 @@ class MasterAgent:
         
         # 数据库查询/分析相关意图
         sql_data = None
-        analysis_data = None
+        analysis_text = None
         
         if sql_result:
             if sql_result.get("error"):
@@ -1955,29 +2080,41 @@ class MasterAgent:
                 # 如果已有 SQL 数据，降级为仅基于 SQL 回答
                 if sql_data:
                     state["metadata"]["analysis_warning"] = analysis_result["error"]
-                    analysis_data = None
+                    analysis_text = None
                 else:
                     state["final_answer"] = f"分析出错：{analysis_result['error']}"
                     state["messages"] = list(state["messages"]) + [AIMessage(content=state["final_answer"])]
                     return state
-            analysis_data = analysis_result.get("analysis")
+            analysis_text = self._compose_analysis_text(analysis_result, anomaly_result)
             # 将图表配置存入 metadata，流式接口和前端可读取
             if analysis_result.get("chart"):
                 state["metadata"]["chart"] = analysis_result["chart"]
         
         try:
+            summary_cache_key = self._build_summary_cache_key(
+                question,
+                sql_data,
+                analysis_text,
+            )
+            cached_summary = self._get_summary_cache(summary_cache_key)
+            if cached_summary:
+                state["final_answer"] = cached_summary
+                state["messages"] = list(state["messages"]) + [AIMessage(content=cached_summary)]
+                return state
+
             prompt = get_summary_prompt(
                 question=question,
                 sql_result=sql_data,
-                analysis_result=analysis_data
+                analysis_result=analysis_text
             )
             
             answer = self._llm_to_str(self.llm.invoke(prompt))
             state["final_answer"] = answer
             state["messages"] = list(state["messages"]) + [AIMessage(content=answer)]
+            self._set_summary_cache(summary_cache_key, answer)
             
         except Exception as e:
-            state["final_answer"] = self._fallback_summary(question, sql_data, analysis_data)
+            state["final_answer"] = self._fallback_summary(question, sql_data, analysis_text)
             state["metadata"]["summary_warning"] = str(e)
             state["messages"] = list(state["messages"]) + [AIMessage(content=state["final_answer"])]
         
@@ -2085,6 +2222,17 @@ class MasterAgent:
             self._extract_and_save_memory(all_messages, user_id)
         
         # 缓存结果
+        self._remember_pipeline_snapshot(
+            thread_id,
+            question,
+            answer,
+            intent=final_state.get("intent"),
+            sql_result=final_state.get("sql_result"),
+            analysis_result=final_state.get("analysis_result"),
+            search_result=final_state.get("search_result"),
+            anomaly_result=final_state.get("metadata", {}).get("anomaly_result"),
+        )
+
         self._remember_answer_fact(
             thread_id,
             question,
@@ -2237,6 +2385,7 @@ class MasterAgent:
         sql_result = None
         analysis_result = None
         search_result = None
+        anomaly_result = None
         final_answer = ""
         
         # --- 执行各子任务 ---
@@ -2473,6 +2622,17 @@ class MasterAgent:
 
         if user_id:
             self._extract_and_save_memory(all_messages, user_id)
+
+        self._remember_pipeline_snapshot(
+            thread_id,
+            question,
+            answer,
+            intent=final_state.get("intent"),
+            sql_result=final_state.get("sql_result"),
+            analysis_result=final_state.get("analysis_result"),
+            search_result=final_state.get("search_result"),
+            anomaly_result=final_state.get("metadata", {}).get("anomaly_result"),
+        )
 
         self._remember_answer_fact(
             thread_id,
@@ -2773,8 +2933,11 @@ class MasterAgent:
 
                 if data_to_analyze:
                     analysis_result = self.analysis_agent.analyze(data_to_analyze, question)
+                    anomaly_result = self.anomaly_agent.detect(data_to_analyze, question)
                     if analysis_result.get("chart"):
                         yield sse("chart", config=analysis_result["chart"])
+                    if anomaly_result and anomaly_result.get("summary"):
+                        yield sse("status", message=anomaly_result["summary"])
                     if analysis_result.get("error"):
                         yield sse("error", message=f"数据分析出错: {analysis_result['error']}")
                 else:
@@ -2800,6 +2963,10 @@ class MasterAgent:
                 if sql_result.get("error"):
                     yield sse("error", message=f"数据库查询出错: {sql_result['error']}")
                 self._remember_last_sql_result(thread_id, sql_result)
+                if sql_result.get("data"):
+                    anomaly_result = self.anomaly_agent.detect(sql_result["data"], question)
+                    if anomaly_result and anomaly_result.get("summary"):
+                        yield sse("status", message=anomaly_result["summary"])
                 if search_result.get("sources"):
                     yield sse("sources", sources=search_result["sources"])
                 if search_result.get("error"):
@@ -2821,7 +2988,36 @@ class MasterAgent:
                 yield sse("chunk", content=final_answer)
             else:
                 sql_data = sql_result.get("data") if sql_result else None
-                analysis_data = analysis_result.get("analysis") if analysis_result else None
+                analysis_data = self._compose_analysis_text(analysis_result, anomaly_result)
+                summary_cache_key = self._build_summary_cache_key(
+                    question,
+                    sql_data,
+                    analysis_data,
+                )
+                cached_summary = self._get_summary_cache(summary_cache_key)
+                if cached_summary:
+                    final_answer = cached_summary
+                    yield sse("chunk", content=final_answer)
+                    yield sse("done", answer=final_answer)
+                    self._remember_pipeline_snapshot(
+                        thread_id,
+                        question,
+                        final_answer,
+                        intent=intent,
+                        sql_result=sql_result,
+                        analysis_result=analysis_result,
+                        search_result=search_result,
+                        anomaly_result=anomaly_result,
+                    )
+                    self._remember_answer_fact(
+                        thread_id,
+                        question,
+                        final_answer,
+                        intent=intent,
+                        user_id=user_id,
+                        sql_result=sql_result,
+                    )
+                    return
                 summary_prompt = get_summary_prompt(
                     question=question,
                     sql_result=sql_data,
@@ -2857,12 +3053,25 @@ class MasterAgent:
                         think_buffer = ""
                         final_answer += chunk_text
                         yield sse("chunk", content=chunk_text)
+                    if final_answer:
+                        self._set_summary_cache(summary_cache_key, final_answer)
                 except Exception as e:
                     logger.warning(f"Stream summary failed, fallback summary used: {e}")
                     final_answer = self._fallback_summary(question, sql_data, analysis_data)
                     yield sse("chunk", content=final_answer)
 
         yield sse("done", answer=final_answer)
+
+        self._remember_pipeline_snapshot(
+            thread_id,
+            question,
+            final_answer,
+            intent=intent,
+            sql_result=sql_result,
+            analysis_result=analysis_result,
+            search_result=search_result,
+            anomaly_result=anomaly_result,
+        )
 
         self._remember_answer_fact(
             thread_id,

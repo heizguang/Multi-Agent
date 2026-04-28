@@ -11,6 +11,9 @@ import os
 import re
 import sys
 import logging
+import json
+import hashlib
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -33,7 +36,29 @@ class WebSearchAgent:
         self.max_results = max_results
         self.available = False
         self.search_tool = None
+        self.cache_ttl_seconds = 900
+        self._raw_cache: Dict[str, Dict[str, Any]] = {}
+        self._answer_cache: Dict[str, Dict[str, Any]] = {}
         self._init_search_tool(tavily_api_key)
+
+    def _normalize_question(self, question: str) -> str:
+        return " ".join(question.strip().lower().split())
+
+    def _make_cache_key(self, *parts: Any) -> str:
+        raw = "||".join(str(part) for part in parts)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _get_cache_entry(self, cache: Dict[str, Dict[str, Any]], key: str) -> Dict[str, Any] | None:
+        entry = cache.get(key)
+        if not entry:
+            return None
+        if time.time() - float(entry.get("timestamp", 0)) > self.cache_ttl_seconds:
+            cache.pop(key, None)
+            return None
+        return entry.get("value")
+
+    def _set_cache_entry(self, cache: Dict[str, Dict[str, Any]], key: str, value: Dict[str, Any]) -> None:
+        cache[key] = {"timestamp": time.time(), "value": value}
 
     def _init_search_tool(self, api_key: str):
         effective_key = api_key or os.getenv("TAVILY_API_KEY", "")
@@ -113,6 +138,11 @@ class WebSearchAgent:
         return text
 
     def search_raw(self, question: str) -> Dict[str, Any]:
+        cache_key = self._make_cache_key("raw", self._normalize_question(question))
+        cached = self._get_cache_entry(self._raw_cache, cache_key)
+        if cached is not None:
+            return dict(cached)
+
         result = {
             "formatted_text": "",
             "sources": [],
@@ -136,9 +166,20 @@ class WebSearchAgent:
             result["error"] = f"联网搜索失败: {str(e)}"
             logger.exception(f"[DeepSearch] 搜索出错: {e}")
 
+        self._set_cache_entry(self._raw_cache, cache_key, dict(result))
         return result
 
     def synthesize_search(self, question: str, formatted_text: str, sources: List[str]) -> Dict[str, Any]:
+        cache_key = self._make_cache_key(
+            "search_answer",
+            self._normalize_question(question),
+            formatted_text,
+            json.dumps(sources or [], ensure_ascii=False),
+        )
+        cached = self._get_cache_entry(self._answer_cache, cache_key)
+        if cached is not None:
+            return dict(cached)
+
         result = {
             "answer": None,
             "sources": sources or [],
@@ -150,6 +191,7 @@ class WebSearchAgent:
             result["answer"] = self._clean_llm_text(self.llm.invoke(prompt))
         except Exception as e:
             result["error"] = f"搜索结果综合失败: {str(e)}"
+        self._set_cache_entry(self._answer_cache, cache_key, dict(result))
         return result
 
     def synthesize_search_and_sql(
@@ -159,6 +201,17 @@ class WebSearchAgent:
         sources: List[str],
         sql_result_json: str,
     ) -> Dict[str, Any]:
+        cache_key = self._make_cache_key(
+            "search_sql_answer",
+            self._normalize_question(question),
+            formatted_text,
+            json.dumps(sources or [], ensure_ascii=False),
+            sql_result_json,
+        )
+        cached = self._get_cache_entry(self._answer_cache, cache_key)
+        if cached is not None:
+            return dict(cached)
+
         result = {
             "answer": None,
             "sources": sources or [],
@@ -170,6 +223,7 @@ class WebSearchAgent:
             result["answer"] = self._clean_llm_text(self.llm.invoke(prompt))
         except Exception as e:
             result["error"] = f"联合搜索分析失败: {str(e)}"
+        self._set_cache_entry(self._answer_cache, cache_key, dict(result))
         return result
 
     def search(self, question: str) -> Dict[str, Any]:
