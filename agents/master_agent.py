@@ -2408,26 +2408,34 @@ class MasterAgent:
                 if sql_result.get("error"):
                     yield sse("error", message=f"数据库查询出错: {sql_result['error']}")
                 
-                # 保存会话数据
                 self._remember_last_sql_result(thread_id, sql_result)
             
             # 数据分析（适用于 analysis_only / sql_and_analysis）
             if intent in ("analysis_only", "sql_and_analysis"):
+                # 异步优化：启动独立线程执行分析，不阻塞主流程
+                import concurrent.futures
+                
+                def run_analysis():
+                    data_to_analyze = None
+                    if sql_result and sql_result.get("data"):
+                        data_to_analyze = sql_result["data"]
+                    elif thread_id in self.session_data:
+                        last = self.session_data[thread_id].get("last_sql_result", {})
+                        data_to_analyze = last.get("data") if last else None
+                    
+                    if data_to_analyze:
+                        return self.analysis_agent.analyze(data_to_analyze, question)
+                    return None
+                
                 yield sse("status", message="正在分析数据...")
                 
-                data_to_analyze = None
-                if sql_result and sql_result.get("data"):
-                    data_to_analyze = sql_result["data"]
-                elif thread_id in self.session_data:
-                    last = self.session_data[thread_id].get("last_sql_result", {})
-                    data_to_analyze = last.get("data") if last else None
+                # 使用线程池并行执行分析
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    analysis_future = pool.submit(run_analysis)
+                    analysis_result = analysis_future.result()
                 
-                if data_to_analyze:
-                    analysis_result = self.analysis_agent.analyze(data_to_analyze, question)
-                    if analysis_result.get("chart"):
-                        yield sse("chart", config=analysis_result["chart"])
-                else:
-                    yield sse("error", message="没有可分析的数据，请先执行数据查询")
+                if analysis_result and analysis_result.get("chart"):
+                    yield sse("chart", config=analysis_result["chart"])
             
             # 纯联网搜索
             if intent == "web_search":

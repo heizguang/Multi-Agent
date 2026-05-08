@@ -51,34 +51,41 @@ class MultiAgentSystem:
             config_path: 配置文件路径
         """
         self.config = self._load_config(config_path)
-        self.llm = self._init_llm()
         self.db_path = self.config["database"]["path"]
         self.runtime_state_path = Path("./data/user_runtime_state.json")
         self._runtime_lock = threading.Lock()
         self._runtime_state = self._load_runtime_state()
         
-        # 记忆配置
-        memory_config = self.config.get("memory", {})
-        memory_db_path = memory_config.get("long_term_db", "./data/long_term_memory.db")
-        short_term_max_tokens = memory_config.get("short_term_max_tokens", 1000)
+        self._llm = None
+        self._master_agent = None
         
-        # 联网搜索配置
-        search_config = self.config.get("search", {})
-        tavily_api_key = search_config.get("tavily_api_key", "")
-        
-        # 初始化主智能体（内部会初始化三个子智能体：SQL、Analysis、Search）
-        self.master_agent = MasterAgent(
-            llm=self.llm,
-            db_path=self.db_path,
-            num_examples=self.config["nl2sql"]["num_examples"],
-            memory_db_path=memory_db_path,
-            short_term_max_tokens=short_term_max_tokens,
-            tavily_api_key=tavily_api_key
-        )
-        
-        # 用户登录状态
-        self.user_id = None  # 当前登录用户
-        self.session_id = None  # 当前会话ID
+        self.user_id = None
+        self.session_id = None
+    
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = self._init_llm()
+        return self._llm
+    
+    @property
+    def master_agent(self):
+        if self._master_agent is None:
+            memory_config = self.config.get("memory", {})
+            memory_db_path = memory_config.get("long_term_db", "./data/long_term_memory.db")
+            short_term_max_tokens = memory_config.get("short_term_max_tokens", 1000)
+            search_config = self.config.get("search", {})
+            tavily_api_key = search_config.get("tavily_api_key", "")
+            
+            self._master_agent = MasterAgent(
+                llm=self.llm,
+                db_path=self.db_path,
+                num_examples=self.config["nl2sql"]["num_examples"],
+                memory_db_path=memory_db_path,
+                short_term_max_tokens=short_term_max_tokens,
+                tavily_api_key=tavily_api_key
+            )
+        return self._master_agent
 
     def _load_runtime_state(self) -> Dict[str, Any]:
         if not self.runtime_state_path.exists():
@@ -210,10 +217,8 @@ class MultiAgentSystem:
             restored_session_id = self._restore_session_id(user_id)
             self.session_id = str(uuid.uuid4())  # 生成新的会话ID
             
-            # 更新长期记忆中的用户活跃时间
             self.session_id = restored_session_id
             self._persist_user_runtime_state(user_id)
-            self.master_agent.long_term_memory.update_user_activity(user_id)
             
             return True
         except Exception as e:

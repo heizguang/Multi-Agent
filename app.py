@@ -153,12 +153,7 @@ def login():
         # 创建或获取用户系统
         system = get_or_create_system(user_id)
 
-        # 直接从长期记忆数据库加载用户信息（无需等待对话总结）
-        ltm = system.master_agent.long_term_memory
-        profile = ltm.get_user_profile(user_id)
-        preferences = ltm.get_all_preferences(user_id)
-        knowledge = ltm.get_all_knowledge(user_id, limit=50)
-
+        # 直接返回，不加载大量数据（避免触发 Agent 初始化）
         return jsonify({
             'success': True,
             'user_id': user_id,
@@ -168,9 +163,9 @@ def login():
                 'logged_in': True,
                 'user_id': user_id,
                 'session_id': system.session_id,
-                'profile': profile,
-                'preferences': preferences,
-                'knowledge': knowledge
+                'profile': {},
+                'preferences': {},
+                'knowledge': []
             }
         })
     except Exception as e:
