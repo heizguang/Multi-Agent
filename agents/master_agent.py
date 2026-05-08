@@ -2160,7 +2160,6 @@ class MasterAgent:
             yield sse("status", message="命中记忆，直接回答...")
             for char in memory_answer:
                 yield sse("chunk", content=char)
-                time.sleep(0.01)
             yield sse("done", answer=memory_answer)
             self._remember_conversation_turn(thread_id, question, memory_answer)
             self._remember_answer_fact(
@@ -2398,7 +2397,7 @@ class MasterAgent:
             # SQL 查询（适用于 sql_only / sql_and_analysis / search_and_sql）
             if intent in ("sql_only", "sql_and_analysis"):
                 yield sse("status", message="正在查询数据库...")
-                sql_result = self.sql_agent.query(question)
+                sql_result = self.sql_agent.query(question, max_retries=2)
                 
                 if sql_result.get("sql"):
                     yield sse(
@@ -2672,7 +2671,6 @@ class MasterAgent:
             yield sse("status", message="命中记忆，直接回答...")
             for char in memory_answer:
                 yield sse("chunk", content=char)
-                time.sleep(0.01)
             yield sse("done", answer=memory_answer)
             self._remember_conversation_turn(thread_id, question, memory_answer)
             self._remember_answer_fact(
@@ -2701,7 +2699,6 @@ class MasterAgent:
         yield sse("intent", intent="memory_or_pipeline")
         for char in answer:
             yield sse("chunk", content=char)
-            time.sleep(0.01)
         yield sse("done", answer=answer)
 
     def query(self, question: str, thread_id: str = "default", user_id: Optional[str] = None) -> str:
@@ -2804,7 +2801,6 @@ class MasterAgent:
             yield sse("status", message="命中记忆，直接回答...")
             for char in memory_answer:
                 yield sse("chunk", content=char)
-                time.sleep(0.01)
             yield sse("done", answer=memory_answer)
             self._remember_conversation_turn(thread_id, question, memory_answer)
             self._remember_answer_fact(
@@ -2911,7 +2907,7 @@ class MasterAgent:
         else:
             if intent in ("sql_only", "sql_and_analysis"):
                 yield sse("status", message="正在查询数据库...")
-                sql_result = self.sql_agent.query(question)
+                sql_result = self.sql_agent.query(question, max_retries=2)
                 if sql_result.get("sql"):
                     yield sse(
                         "sql",
