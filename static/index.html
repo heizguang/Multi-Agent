@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>多智能体数据查询系统 v3.0</title>
+    <title>DataPilot - 智能数据分析平台</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.0/github-markdown.min.css">
@@ -20,13 +20,13 @@
             <div class="login-header">
                 <div class="logo-container">
                     <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 2L2 7L12 12L22 7L12 2Z"/>
-                        <path d="M2 17L12 22L22 17"/>
-                        <path d="M2 12L12 17L22 12"/>
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                        <line x1="12" y1="22.08" x2="12" y2="12"/>
                     </svg>
-                    <h1>多智能体数据查询系统</h1>
+                    <h1>DataPilot</h1>
                 </div>
-                <p class="login-subtitle">基于 LangGraph 的智能数据分析平台 v3.0</p>
+                <p class="login-subtitle">智能数据分析平台</p>
             </div>
             
             <div class="login-body">
@@ -67,7 +67,7 @@
                             <rect x="14" y="14" width="7" height="7"/>
                             <rect x="3" y="14" width="7" height="7"/>
                         </svg>
-                        <span>多智能体协作</span>
+                        <span>多数据源</span>
                     </div>
                     <div class="feature-item">
                         <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -90,11 +90,11 @@
             <div class="sidebar-header">
                 <div class="logo-container-small">
                     <svg class="logo-icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 2L2 7L12 12L22 7L12 2Z"/>
-                        <path d="M2 17L12 22L22 17"/>
-                        <path d="M2 12L12 17L22 12"/>
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                        <line x1="12" y1="22.08" x2="12" y2="12"/>
                     </svg>
-                    <h2>数据查询系统</h2>
+                    <h2>DataPilot</h2>
                 </div>
             </div>
 
@@ -135,20 +135,20 @@
                 <div class="quick-questions">
                     <h3>快速问题</h3>
                     <div class="question-list">
-                        <button class="question-item" data-question="对比一下研发部、产品部和设计部的平均薪资水平">
-                            💰 部门薪资对比
+                        <button class="question-item" data-question="公司一共有多少名员工？">
+                            📊 员工总数
                         </button>
-                        <button class="question-item" data-question="找出薪资最高的10名员工，分析他们的职位和部门分布特征">
-                            🏆 高薪员工分析
+                        <button class="question-item" data-question="各部门分别有多少人？">
+                            👥 部门人员统计
                         </button>
-                        <button class="question-item" data-question="分析公司各城市的人员分布和薪资差异，给出优化建议">
-                            🌍 城市分布分析
+                        <button class="question-item" data-question="公司员工的平均薪资是多少？">
+                            💵 平均薪资
                         </button>
-                        <button class="question-item" data-question="搜索一下2025年国内互联网行业程序员平均薪资水平">
-                            🌐 搜索行业薪资
+                        <button class="question-item" data-question="2026年互联网行业程序员平均薪资是多少？">
+                            � 行业薪资行情
                         </button>
-                        <button class="question-item" data-question="搜索行业平均薪资，和我们公司各部门薪资水平进行对比分析">
-                            📈 内外部薪资对比
+                        <button class="question-item" data-question="对比一下我们公司和行业平均薪资水平">
+                            📈 薪资水平对比
                         </button>
                     </div>
                 </div>
@@ -158,7 +158,7 @@
                     <h4>系统功能</h4>
                     <ul>
                         <li>💡 自然语言数据查询</li>
-                        <li>🔍 智能数据分析</li>
+                        <li>🔍 数据查询分析</li>
                         <li>🌐 DeepSearch 联网搜索</li>
                         <li>📊 数据可视化图表</li>
                         <li>🧠 长短期记忆</li>
@@ -184,7 +184,7 @@
             <div class="chat-container">
                 <div class="chat-messages" id="chatMessages">
                     <div class="welcome-message">
-                        <h2>👋 欢迎使用多智能体数据查询系统</h2>
+                        <h2>👋 欢迎使用 DataPilot</h2>
                         <p>支持数据库查询、智能分析、DeepSearch 联网搜索，自然语言提问即可。</p>
                         <div class="welcome-tips">
                             <div class="tip-item">

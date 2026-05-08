@@ -1,19 +1,19 @@
-# 多智能体智能数据查询系统 v3.0
+# DataPilot - 智能数据分析平台
 
-> v3.0 新增：联网搜索子智能体（Tavily）、搜索+SQL 联合对比分析、流式来源展示、6 种意图路由。
+> 支持自然语言数据查询、深度分析、联网搜索、数据可视化和长短期记忆。
 
-基于 LangGraph 的**一主三从**多智能体架构，支持自然语言数据查询、深度分析、**联网搜索**、数据可视化和长短期记忆。
+基于 LangGraph 的多智能体架构，支持自然语言数据查询、深度分析、联网搜索、数据可视化和长短期记忆。
 
 https://github.com/user-attachments/assets/597693d0-df09-4198-93bd-242497f23e09
 
 ## 架构设计
 
 ```
-MultiAgentSystem (agent.py)
+DataPilot (agent.py)
     └── MasterAgent（主智能体 - 路由 / 协调 / 记忆）
-            ├── SQLQueryAgent     （子智能体1 - NL2SQL + 自动纠错）
-            ├── DataAnalysisAgent （子智能体2 - 数据分析 + ECharts 可视化）
-            └── WebSearchAgent    （子智能体3 - Tavily 联网搜索）⭐NEW
+            ├── SQLQueryAgent     （NL2SQL + 自动纠错）
+            ├── DataAnalysisAgent （数据分析 + ECharts 可视化）
+            └── WebSearchAgent    （联网搜索）
 ```
 
 ### 意图路由（6 种）
@@ -24,12 +24,12 @@ MultiAgentSystem (agent.py)
 | `sql_only` | 纯数据查询 | SQLQueryAgent |
 | `analysis_only` | 分析已有结果 | DataAnalysisAgent |
 | `sql_and_analysis` | 查询 + 深度分析 | SQL → Analysis |
-| `web_search` | 联网信息检索 ⭐NEW | WebSearchAgent |
-| `search_and_sql` | 内外部数据对比 ⭐NEW | SQL + WebSearchAgent |
+| `web_search` | 联网信息检索 | WebSearchAgent |
+| `search_and_sql` | 内外部数据对比 | SQL + WebSearchAgent |
 
 ## 核心功能
 
-### 1. 联网搜索（WebSearchAgent）⭐NEW
+### 1. 联网搜索（WebSearchAgent）
 
 - **纯搜索模式**：调用 Tavily API 检索互联网信息，LLM 综合多来源内容生成回答，附带可信来源 URL 列表
 - **搜索+SQL 联合对比**：同时查询内部数据库与互联网，LLM 从两个维度对比分析，适用于"内部薪资 vs 行业水平"等场景
@@ -68,7 +68,7 @@ MultiAgentSystem (agent.py)
 | `status` | 当前处理步骤描述 |
 | `intent` | 识别出的意图标签 |
 | `sql` | 生成的 SQL 语句 |
-| `sources` | 搜索来源 URL 列表 ⭐NEW |
+| `sources` | 搜索来源 URL 列表 |
 | `chart` | ECharts 图表配置 JSON |
 | `chunk` | 回答文字流片段 |
 | `done` | 完成信号 |
@@ -178,7 +178,7 @@ memory:
   compression_threshold: 10
   auto_extract_knowledge: true
 
-# 联网搜索配置 ⭐NEW
+# 联网搜索配置
 search:
   tavily_api_key: ""        # 留空则从环境变量读取
   max_results: 5            # 每次搜索返回最大结果数
@@ -194,7 +194,7 @@ search:
 | `/api/query_stream` | POST | 流式 SSE 查询（推荐） |
 | `/api/new_session` | POST | 新建会话 |
 | `/api/user_info` | POST | 获取用户信息和知识列表 |
-| `/api/health` | GET | 健康检查，返回 `web_search` 可用状态 ⭐NEW |
+| `/api/health` | GET | 健康检查，返回 `web_search` 可用状态 |
 
 ## 测试问题
 
@@ -213,11 +213,11 @@ search:
 **仅分析**
 - 帮我分析一下上一次查询的数据
 
-**联网搜索** ⭐NEW
+**联网搜索**
 - 2025 年互联网行业软件工程师的平均薪资是多少？
 - 目前 AI 大模型领域的就业趋势如何？
 
-**搜索 + SQL 联合对比** ⭐NEW
+**搜索 + SQL 联合对比**
 - 我们公司研发部的薪资水平和行业平均水平相比怎么样？
 - 我们公司的薪资结构在同行业中处于什么水平？
 
@@ -230,7 +230,7 @@ intelligent_data_query/
 │   ├── master_agent.py          # 主智能体（路由 / 记忆 / 汇总）
 │   ├── sql_agent.py             # SQL 查询子智能体（含自动纠错）
 │   ├── analysis_agent.py        # 数据分析子智能体（含 ECharts）
-│   └── search_agent.py          # 联网搜索子智能体（Tavily）⭐NEW
+│   └── search_agent.py          # 联网搜索子智能体
 ├── memory/                       # 记忆模块
 │   ├── long_term_memory.py      # 长期记忆管理器（SQLite）
 │   └── memory_extractor.py      # 记忆提取器（LLM 自动提取）
@@ -262,7 +262,7 @@ intelligent_data_query/
 | 工作流编排 | LangGraph |
 | LLM 框架 | LangChain |
 | 大语言模型 | 通义千问（qwen-turbo） |
-| 联网搜索 | Tavily（langchain-tavily）⭐NEW |
+| 联网搜索 | Tavily（langchain-tavily） |
 | 数据库协议 | MCP（Model Context Protocol） |
 | 数据存储 | SQLite |
 | Web 框架 | Flask + Flask-CORS |
