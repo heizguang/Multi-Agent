@@ -12,6 +12,8 @@ import json
 MODEL_PATH = "/root/autodl-tmp/models/qwen3.5-4b"  # 模型路径
 VLLM_PORT = 8000
 VLLM_HOST = "0.0.0.0"
+VLLM_STARTUP_TIMEOUT = int(os.environ.get("VLLM_STARTUP_TIMEOUT", "600"))  # 秒
+VLLM_HEALTH_CHECK_INTERVAL = float(os.environ.get("VLLM_HEALTH_CHECK_INTERVAL", "2"))  # 秒
 
 # vLLM 服务进程
 vllm_process = None
@@ -55,18 +57,23 @@ def start_vllm_server():
     )
     
     print(f"[信息] vLLM 进程已启动 PID: {vllm_process.pid}")
-    print("[信息] 等待服务就绪...")
+    print(f"[信息] 等待服务就绪（超时: {VLLM_STARTUP_TIMEOUT}s）...")
     
     # 等待服务就绪
-    for i in range(60):
+    deadline = time.time() + VLLM_STARTUP_TIMEOUT
+    while time.time() < deadline:
+        # 子进程如果提前退出，直接失败返回，避免“假超时”
+        if vllm_process.poll() is not None:
+            print(f"[错误] vLLM 进程已退出，退出码: {vllm_process.returncode}")
+            return False
         try:
             response = requests.get(f"http://localhost:{VLLM_PORT}/v1/models", timeout=2)
             if response.status_code == 200:
                 print("[成功] vLLM 服务已就绪!")
                 return True
-        except:
+        except Exception:
             pass
-        time.sleep(2)
+        time.sleep(VLLM_HEALTH_CHECK_INTERVAL)
     
     print("[错误] vLLM 服务启动超时")
     return False
