@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 import os
 sys.path.append(str(Path(__file__).parent.parent))
 from logging_config import setup_logging
+from llm_client import OpenAICompatRequestsLLM
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -37,6 +38,41 @@ class SQLQueryAgent:
         self.num_examples = num_examples
         self._schema_cache: List[Dict[str, Any]] | None = None
         self._schema_selection_cache: Dict[str, str] = {}
+        self.sql_llm = self._init_sql_llm()
+
+    def _init_sql_llm(self):
+        """初始化 SQL 专用 LLM（可选）。
+
+        通过环境变量启用：
+        - NL2SQL_BASE_URL
+        - NL2SQL_MODEL
+        - NL2SQL_API_KEY (可选，本地 vLLM 可留空)
+        """
+        base_url = os.getenv("NL2SQL_BASE_URL", "").strip()
+        model = os.getenv("NL2SQL_MODEL", "").strip()
+        api_key = os.getenv("NL2SQL_API_KEY", "").strip() or "dummy"
+
+        if not base_url or not model:
+            logger.info("SQL 专用 LLM 未配置，使用主 LLM 通道")
+            return None
+
+        if not base_url.rstrip("/").endswith("/v1"):
+            base_url = base_url.rstrip("/") + "/v1"
+
+        try:
+            sql_llm = OpenAICompatRequestsLLM(
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=0.0,
+                max_tokens=512,
+                timeout=120,
+            )
+            logger.info(f"SQL 专用 LLM 已启用: model={model}, base_url={base_url}")
+            return sql_llm
+        except Exception as e:
+            logger.warning(f"SQL 专用 LLM 初始化失败，回退主 LLM: {e}")
+            return None
 
     @staticmethod
     def _llm_to_str(result) -> str:
@@ -53,6 +89,15 @@ class SQLQueryAgent:
         text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
         text = re.sub(r"</think>", "", text).strip()
         return text
+
+    def _invoke_sql_llm(self, prompt: str) -> str:
+        """优先调用 SQL 专用模型，失败时自动回退主 LLM。"""
+        if self.sql_llm is not None:
+            try:
+                return self._llm_to_str(self.sql_llm.invoke(prompt)).strip()
+            except Exception as e:
+                logger.warning(f"SQL 专用 LLM 调用失败，回退主 LLM: {e}")
+        return self._llm_to_str(self.llm.invoke(prompt)).strip()
 
     def _load_schema_cache(self) -> List[Dict[str, Any]]:
         if self._schema_cache is not None:
@@ -380,7 +425,7 @@ class SQLQueryAgent:
             schema=schema,
             num_examples=self.num_examples,
         )
-        sql = self._llm_to_str(self.llm.invoke(prompt)).strip()
+        sql = self._invoke_sql_llm(prompt)
         return self._clean_sql(sql)
 
     def _correct_sql(
@@ -394,7 +439,7 @@ class SQLQueryAgent:
             error_msg=error_msg,
             attempt=attempt,
         )
-        corrected = self._llm_to_str(self.llm.invoke(prompt)).strip()
+        corrected = self._invoke_sql_llm(prompt)
         return self._clean_sql(corrected)
 
     async def _execute_sql_via_mcp(self, sql: str) -> str:
