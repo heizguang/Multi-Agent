@@ -1,0 +1,43 @@
+{
+  "users": {
+    "2": {
+      "session_id": "b7aebbd4-82f6-4dc4-b4ba-c046978df157"
+    },
+    "smoke_user": {
+      "session_id": "923799b0-24af-491c-8e61-bc103269aaa8"
+    },
+    "smoke_user_2": {
+      "session_id": "f4e155e4-bfb7-4425-867a-9203876afcb4"
+    },
+    "e2e_user": {
+      "session_id": "a5147ee3-5f73-4848-a23b-f3eeddb1f6fa"
+    },
+    "search_user_2": {
+      "session_id": "29acc4c2-10f0-4ff0-9ace-bad2f3fa3f3c"
+    },
+    "vector_user": {
+      "session_id": "d2fdc9ea-eff5-469c-9e65-3fe28042dec6"
+    },
+    "search_user_noproxy": {
+      "session_id": "8c3c9147-6267-475a-824c-1af89c9d7eb5"
+    },
+    "final_e2e_user": {
+      "session_id": "b9bd3d93-b219-4667-b7f3-21ac0cf692ec"
+    },
+    "vector_api_user": {
+      "session_id": "5753ff25-3712-4a9c-a4e2-3047a7125dca"
+    },
+    "21": {
+      "session_id": "f1faa3d8-be34-450f-9e5e-1afce2521207"
+    },
+    "22": {
+      "session_id": "8430dad3-8a7f-4486-854a-9b94c867a34c"
+    },
+    "23": {
+      "session_id": "ce5fd6e1-04c9-4ee1-b86a-84d45d812916"
+    },
+    "24": {
+      "session_id": "76b81d48-95e8-477e-93e5-637142bd4758"
+    }
+  }
+}
