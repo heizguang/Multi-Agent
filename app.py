@@ -532,8 +532,12 @@ if __name__ == '__main__':
             if check_milvus_running():
                 logger.info("Milvus 服务已在运行")
             else:
-                logger.warning("Milvus 服务未运行，向量检索功能将不可用")
-                logger.warning("如需启用向量检索，请先在另一个终端运行: milvus-server --data milvus_data")
+                logger.info("Milvus 服务未运行，正在尝试自动启动...")
+                if start_milvus_server():
+                    logger.info("Milvus 服务启动成功")
+                else:
+                    logger.warning("Milvus 服务未运行，向量检索功能将不可用")
+                    logger.warning("如需启用向量检索，请先在另一个终端运行: milvus-server --data milvus_data")
 
     init_db_and_check()
     

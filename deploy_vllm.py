@@ -19,6 +19,9 @@ import requests
 
 # 配置（可通过环境变量覆盖）
 MODEL_PATH = os.environ.get("VLLM_MODEL_PATH", "/root/autodl-tmp/models/qwen3.5-4b")
+VLLM_BASE_MODEL_PATH = os.environ.get("VLLM_BASE_MODEL_PATH", "/root/autodl-tmp/models/qwen3.5-4b")
+VLLM_LORA_PATH = os.environ.get("VLLM_LORA_PATH", "/root/autodl-tmp/models/nl2sql-qwen3.5-4b/final")
+VLLM_LORA_NAME = os.environ.get("VLLM_LORA_NAME", "nl2sql")
 VLLM_PORT = int(os.environ.get("VLLM_PORT", "6006"))
 VLLM_HOST = os.environ.get("VLLM_HOST", "0.0.0.0")
 VLLM_DTYPE = os.environ.get("VLLM_DTYPE", "half")
@@ -45,6 +48,24 @@ def _ensure_state_dir() -> None:
 
 def _health_url() -> str:
     return f"http://127.0.0.1:{VLLM_PORT}/v1/models"
+
+
+def _using_lora() -> bool:
+    return bool(VLLM_BASE_MODEL_PATH and VLLM_LORA_PATH)
+
+
+def _serve_model_path() -> str:
+    if _using_lora():
+        return VLLM_BASE_MODEL_PATH
+    return MODEL_PATH
+
+
+def _request_model_name() -> str:
+    # 启用 LoRA 时，请求侧 model 使用 LoRA 名称；
+    # 否则保持与 serve 的模型路径一致。
+    if _using_lora():
+        return VLLM_LORA_NAME
+    return MODEL_PATH
 
 
 def _read_pid() -> Optional[int]:
@@ -86,7 +107,7 @@ def _build_cmd() -> list[str]:
     cmd = [
         "vllm",
         "serve",
-        MODEL_PATH,
+        _serve_model_path(),
         "--host",
         VLLM_HOST,
         "--port",
@@ -102,6 +123,14 @@ def _build_cmd() -> list[str]:
     ]
     if VLLM_TRUST_REMOTE_CODE:
         cmd.append("--trust-remote-code")
+    if _using_lora():
+        cmd.extend(
+            [
+                "--enable-lora",
+                "--lora-modules",
+                f"{VLLM_LORA_NAME}={VLLM_LORA_PATH}",
+            ]
+        )
     return cmd
 
 
@@ -126,7 +155,11 @@ def start_vllm_server(force_restart: bool = False) -> bool:
         print("[提示] 可能是外部启动的 vLLM，请先手动停止后再用本脚本管理。")
         return True
 
-    print(f"[信息] 启动 vLLM 服务: {MODEL_PATH}")
+    print(f"[信息] 启动 vLLM 服务: {_serve_model_path()}")
+    if _using_lora():
+        print(f"[信息] LoRA 适配器: {VLLM_LORA_NAME} -> {VLLM_LORA_PATH}")
+    else:
+        print("[信息] LoRA 适配器: 未启用")
     print(f"[信息] 监听地址: {VLLM_HOST}:{VLLM_PORT}")
     print(f"[信息] max-model-len: {VLLM_MAX_MODEL_LEN}")
     print(f"[信息] 日志文件: {LOG_FILE}")
@@ -230,7 +263,7 @@ def test_vllm():
         "问题：各部门分别有多少人？\nSQL:"
     )
     payload = {
-        "model": MODEL_PATH,
+        "model": _request_model_name(),
         "prompt": prompt,
         "max_tokens": 128,
         "temperature": 0.0,

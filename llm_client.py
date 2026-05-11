@@ -30,6 +30,7 @@ class OpenAICompatRequestsLLM:
         temperature: float = 0.1,
         max_tokens: int = 2048,
         timeout: int = 60,
+        api_mode: str = "chat",
     ):
         self.model = model
         self.api_key = api_key
@@ -37,8 +38,11 @@ class OpenAICompatRequestsLLM:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
+        self.api_mode = api_mode.strip().lower()
 
     def _endpoint(self) -> str:
+        if self.api_mode == "completions":
+            return f"{self.base_url}/completions"
         return f"{self.base_url}/chat/completions"
 
     def _headers(self) -> Dict[str, str]:
@@ -71,12 +75,20 @@ class OpenAICompatRequestsLLM:
         return [{"role": "user", "content": str(prompt)}]
 
     def invoke(self, prompt: Any) -> LLMTextResponse:
-        payload = {
-            "model": self.model,
-            "messages": self._normalize_messages(prompt),
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
+        if self.api_mode == "completions":
+            payload = {
+                "model": self.model,
+                "prompt": str(prompt),
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            }
+        else:
+            payload = {
+                "model": self.model,
+                "messages": self._normalize_messages(prompt),
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            }
         response = requests.post(
             self._endpoint(),
             headers=self._headers(),
@@ -93,8 +105,11 @@ class OpenAICompatRequestsLLM:
         content = ""
         choices = data.get("choices") or []
         if choices:
-            message = choices[0].get("message") or {}
-            content = str(message.get("content") or "")
+            if self.api_mode == "completions":
+                content = str(choices[0].get("text") or "")
+            else:
+                message = choices[0].get("message") or {}
+                content = str(message.get("content") or "")
 
         return LLMTextResponse(content=content)
 

@@ -1,31 +1,41 @@
+from pymilvus import connections, utility
 import sys
-import os
-from pathlib import Path
 
-sys.path.append(str(Path(__file__).parent))
+# 配置连接信息
+# 根据你的截图，端口映射是 19530:19530，所以 host 是 localhost，port 是 19530
+HOST = "localhost"
+PORT = "19530"
 
-from env_loader import load_env_file
-load_env_file()
+def test_connection():
+    print(f"正在尝试连接到 Milvus 服务器 {HOST}:{PORT} ...")
 
-print(f"MILVUS_ENABLED: {os.getenv('MILVUS_ENABLED')}")
-print(f"MILVUS_EMBEDDED: {os.getenv('MILVUS_EMBEDDED')}")
-print(f"MILVUS_HOST: {os.getenv('MILVUS_HOST')}")
-print(f"MILVUS_PORT: {os.getenv('MILVUS_PORT')}")
+    try:
+        # 1. 建立连接
+        # alias="default" 是默认的连接别名
+        connections.connect(alias="default", host=HOST, port=PORT)
 
-try:
-    from pymilvus import connections
-    print("\n尝试连接 Milvus...")
-    
-    use_embedded = os.getenv("MILVUS_EMBEDDED", "false").lower() == "true"
-    print(f"use_embedded: {use_embedded}")
-    
-    if use_embedded:
-        connections.connect(alias="default", uri="./milvus_data.db")
-    else:
-        host = os.getenv("MILVUS_HOST", "localhost")
-        port = int(os.getenv("MILVUS_PORT", "19530"))
-        connections.connect(host=host, port=port)
-    
-    print("连接成功!")
-except Exception as e:
-    print(f"连接失败: {e}")
+        # 2. 检查连接状态
+        # get_connection_addr 会返回连接地址信息，如果未连接则返回空
+        addr = connections.get_connection_addr("default")
+        print(f"连接地址配置: {addr}")
+
+        # 3. 尝试获取服务器版本
+        # 如果服务器未就绪，这一步通常会超时或报错
+        version = utility.get_server_version()
+        print(f"成功连接到 Milvus！")
+        print(f"服务器版本: {version}")
+
+        # 4. (可选) 列出所有集合，进一步验证读写权限
+        collections = utility.list_collections()
+        print(f"当前数据库中的集合数量: {len(collections)}")
+        # print(f"集合列表: {collections}")
+
+    except Exception as e:
+        print(f"连接失败！错误信息: {e}")
+        sys.exit(1)
+    finally:
+        # 断开连接
+        connections.disconnect("default")
+
+if __name__ == "__main__":
+    test_connection()

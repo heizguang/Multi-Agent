@@ -67,8 +67,11 @@ class SQLQueryAgent:
                 temperature=0.0,
                 max_tokens=512,
                 timeout=120,
+                api_mode="completions",
             )
-            logger.info(f"SQL 专用 LLM 已启用: model={model}, base_url={base_url}")
+            logger.info(
+                f"SQL 专用 LLM 已启用: model={model}, base_url={base_url}, api_mode=completions"
+            )
             return sql_llm
         except Exception as e:
             logger.warning(f"SQL 专用 LLM 初始化失败，回退主 LLM: {e}")
@@ -86,8 +89,14 @@ class SQLQueryAgent:
             text = str(result.text)
         else:
             text = str(result)
-        text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
-        text = re.sub(r"</think>", "", text).strip()
+        text = re.sub(
+            r"<think>[\s\S]*?</think>",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        text = re.sub(r"</think>", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"<thinking>[\s\S]*?</thinking>", "", text, flags=re.IGNORECASE).strip()
         return text
 
     def _invoke_sql_llm(self, prompt: str) -> str:
@@ -298,7 +307,44 @@ class SQLQueryAgent:
         self._schema_selection_cache[cache_key] = formatted_schema
         return formatted_schema
 
+    @staticmethod
+    def _extract_sql_from_llm_output(text: str) -> str:
+        """从含思维链、说明或 markdown 的模型输出中取出单条 SQL 主体。"""
+        if not text:
+            return ""
+        text = text.strip()
+        m = re.search(r"```\s*sql\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        for fence in re.finditer(r"```\s*([\s\S]*?)```", text, re.IGNORECASE):
+            inner = fence.group(1).strip()
+            if re.search(r"(?is)\b(WITH|SELECT)\b", inner):
+                return inner
+        stripped = re.sub(r"(?is)^.*?(?=\b(WITH|SELECT)\b)", "", text, count=1)
+        text = stripped.strip() if stripped.strip() else text
+        parts = re.split(r"\n\s*\n\s*", text, maxsplit=1)
+        if len(parts) == 2:
+            second = parts[1]
+            head = second[:400].lower()
+            sql_tail_kw = (
+                " from ",
+                " join ",
+                " where ",
+                " group ",
+                " order ",
+                " limit ",
+                " having ",
+                " union ",
+            )
+            if not any(kw in f" {head} " for kw in sql_tail_kw) and not re.match(
+                r"(?is)\s*\(", second
+            ):
+                text = parts[0].strip()
+        return text.strip()
+
     def _clean_sql(self, sql: str) -> str:
+        logger.info(f"SQL Agent before clean: {sql}")
+        sql = self._extract_sql_from_llm_output(sql)
         sql = sql.strip()
         if sql.startswith("```sql"):
             sql = sql[6:]
@@ -315,6 +361,7 @@ class SQLQueryAgent:
             sql = sql[:-3]
 
         sql = sql.strip().rstrip(";").strip()
+        logger.info(f"SQL Agent after clean: {sql}")
         return sql
 
     def _is_safe_sql(self, sql: str) -> bool:
@@ -426,6 +473,7 @@ class SQLQueryAgent:
             num_examples=self.num_examples,
         )
         sql = self._invoke_sql_llm(prompt)
+        logger.info(f"SQL Agent LLM raw output: {sql}")
         return self._clean_sql(sql)
 
     def _correct_sql(
@@ -440,6 +488,7 @@ class SQLQueryAgent:
             attempt=attempt,
         )
         corrected = self._invoke_sql_llm(prompt)
+        logger.info(f"SQL Agent corrected LLM raw output: {corrected}")
         return self._clean_sql(corrected)
 
     async def _execute_sql_via_mcp(self, sql: str) -> str:

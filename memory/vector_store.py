@@ -71,7 +71,7 @@ class VectorStore:
                 self.connected = True
                 logger.info("已连接到 Embedded Milvus (milvus-lite)")
             else:
-                connections.connect(host=self.host, port=self.port)
+                connections.connect(alias="default", host=self.host, port=self.port)
                 self.connected = True
                 logger.info(f"已连接到 Milvus: {self.host}:{self.port}")
             
